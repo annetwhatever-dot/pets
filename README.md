@@ -21,6 +21,15 @@ open build/CodexPets.app
 
 The app appears as a `CP` status-bar item. Use that menu to import a pet folder, switch pets, choose animation states, resize the overlay, copy a state API curl command, or quit.
 
+The menu also includes Calm Pet Engine controls:
+
+- **Animation:** Focus, Default, or Playful attention budgets.
+- **Bubbles:** Off, Important Only, or All.
+- **Reduced Motion:** follow macOS Reduce Motion or force static poses.
+- **Full-screen:** hidden in full-screen apps by default; opt in from Settings.
+
+The transparent overlay is click-through outside the real pet sprite, so padding around the window does not block apps underneath. Mouse proximity, hover, click, double-click, drag, and spam-click reactions work without Accessibility or Input Monitoring permissions.
+
 Imported pets are copied to:
 
 ```text
@@ -60,7 +69,25 @@ curl -X POST http://127.0.0.1:7777/bubble \
   -d '{"text":"Working on it"}'
 ```
 
+Example workflow event:
+
+```sh
+TOKEN=$(cat "$HOME/Library/Application Support/CodexPets/Runtime/state-token")
+curl -X POST http://127.0.0.1:7777/event \
+  -H "content-type: application/json" \
+  -H "x-codex-pets-token: $TOKEN" \
+  -d '{"type":"task.succeeded","label":"Tests passed","importance":"low"}'
+```
+
 Supported states are `idle`, `running`, `running-left`, `running-right`, `waving`, `jumping`, `failed`, `waiting`, and `review`.
+
+Supported event types include `task.succeeded`, `task.needs_user`, and `task.failed`. `/state` remains the backward-compatible shortcut; `/event` is preferred for one-shot success, review, and failure moments.
+
+Run the native tests:
+
+```sh
+sh macos/CodexPets/test.sh
+```
 
 ## Browser Gallery
 
