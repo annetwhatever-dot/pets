@@ -192,6 +192,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bubbles.submenu = bubblesSubmenu
         submenu.addItem(bubbles)
 
+        let muteToday = NSMenuItem(title: "Mute Murmurs Today", action: #selector(muteMurmursToday), keyEquivalent: "")
+        muteToday.target = self
+        submenu.addItem(muteToday)
+
         submenu.addItem(.separator())
 
         let followReduce = NSMenuItem(
@@ -329,6 +333,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
+    @objc private func muteMurmursToday() {
+        overlay.muteMurmursForToday()
+        rebuildMenu()
+    }
+
     @objc private func toggleFollowSystemReduceMotion() {
         let next = !overlay.followsSystemReduceMotion
         overlay.setFollowsSystemReduceMotion(next)
@@ -379,7 +388,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func loadOverlaySettings() {
         let defaults = UserDefaults.standard
         let attentionMode = PetAttentionMode(rawValue: defaults.string(forKey: DefaultsKey.attentionMode) ?? "") ?? .default
-        let bubbleMode = PetBubbleMode(rawValue: defaults.string(forKey: DefaultsKey.bubbleMode) ?? "") ?? .importantOnly
+        let bubbleMode = PetBubbleMode(rawValue: defaults.string(forKey: DefaultsKey.bubbleMode) ?? "") ?? .all
         let followsSystemReduceMotion = defaults.object(forKey: DefaultsKey.followsSystemReduceMotion) as? Bool ?? true
         let alwaysReduceMotion = defaults.bool(forKey: DefaultsKey.alwaysReduceMotion)
         let showsInFullScreen = defaults.bool(forKey: DefaultsKey.showsInFullScreen)
