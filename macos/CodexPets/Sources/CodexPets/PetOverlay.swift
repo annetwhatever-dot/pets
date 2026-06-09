@@ -1,18 +1,22 @@
 import Cocoa
 
 final class PetOverlayController: NSObject {
+    private static let defaultWindowSize = NSSize(width: 190, height: 235)
+
     private let panel: NSPanel
     private let rootView: PetOverlayView
     private var idleReset: Timer?
 
     private(set) var currentPet: PetPackage?
     private(set) var currentStateID = "idle"
-    private(set) var scale: CGFloat = 1.0
+    private(set) var scale: CGFloat = 0.76
 
     override init() {
-        self.rootView = PetOverlayView(frame: NSRect(x: 0, y: 0, width: 230, height: 285))
+        self.rootView = PetOverlayView(
+            frame: NSRect(origin: .zero, size: Self.defaultWindowSize)
+        )
         self.panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 230, height: 285),
+            contentRect: NSRect(origin: .zero, size: Self.defaultWindowSize),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -85,12 +89,12 @@ final class PetOverlayController: NSObject {
     }
 
     private func resizeForScale() {
-        let baseWidth: CGFloat = 230
-        let baseHeight: CGFloat = 285
+        let baseWidth = Self.defaultWindowSize.width
+        let baseHeight = Self.defaultWindowSize.height
         let frame = panel.frame
         let nextSize = NSSize(
-            width: max(baseWidth, 170 * scale + 58),
-            height: max(baseHeight, 190 * scale + 92)
+            width: max(baseWidth, 170 * scale + 50),
+            height: max(baseHeight, 190 * scale + 80)
         )
         let nextFrame = NSRect(
             x: frame.midX - nextSize.width / 2,

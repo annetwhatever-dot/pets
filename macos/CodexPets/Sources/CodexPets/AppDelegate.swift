@@ -135,10 +135,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSMenuItem(title: "Size", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
         let sizes: [(String, CGFloat)] = [
-            ("Small", 0.75),
-            ("Normal", 1.0),
-            ("Large", 1.25),
-            ("Huge", 1.55),
+            ("Small", 0.58),
+            ("Normal", 0.76),
+            ("Large", 1.0),
+            ("Huge", 1.24),
         ]
         for (label, value) in sizes {
             let sizeItem = NSMenuItem(title: label, action: #selector(selectSize(_:)), keyEquivalent: "")
