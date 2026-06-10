@@ -12,6 +12,8 @@ final class PetOverlayController: NSObject {
     private var idlePulseTimer: Timer?
     private var bubbleClearTimer: Timer?
     private var wasCursorOverInteractive = false
+    private var isDraggingPet = false
+    private var activeDragDirection: PetDragDirection?
 
     private(set) var currentPet: PetPackage?
     private(set) var currentStateID = "idle"
@@ -55,14 +57,17 @@ final class PetOverlayController: NSObject {
         rootView.windowDragHandler = { [weak self] delta in
             self?.moveBy(delta)
         }
-        rootView.clickHandler = { [weak self] count in
-            self?.handleDirectSignal(.clicked(count: count))
-        }
-        rootView.dragStartedHandler = { [weak self] in
-            self?.handleDirectSignal(.dragged)
+        rootView.dragMovedHandler = { [weak self] delta in
+            self?.handleDrag(delta: delta)
         }
         rootView.dragEndedHandler = { [weak self] in
+            self?.isDraggingPet = false
+            self?.activeDragDirection = nil
             self?.scheduleIdleReset(after: 0.8)
+            self?.updateMouseTransparencyAndProximity()
+        }
+        rootView.clickHandler = { [weak self] count in
+            self?.handleDirectSignal(.clicked(count: count))
         }
         rootView.bubbleActionHandler = { [weak self] in
             self?.dismissBubbleAndMute()
@@ -92,6 +97,7 @@ final class PetOverlayController: NSObject {
 
     func show() {
         panel.orderFrontRegardless()
+        panel.ignoresMouseEvents = currentPet == nil
         startInteractionPolling()
         scheduleIdlePulse()
     }
@@ -140,6 +146,16 @@ final class PetOverlayController: NSObject {
             if let duration, duration > 0, id != "idle" {
                 scheduleIdleReset(after: duration)
             }
+        }
+    }
+
+    func applyDaemonSnapshot(_ snapshot: DaemonSnapshot) {
+        let presentation = DaemonSnapshotPresenter.presentation(for: snapshot)
+        setState(presentation.stateID)
+        if let bubble = presentation.bubble {
+            setBubble(bubble, autoClearAfter: presentation.autoClearAfter)
+        } else if presentation.stateID == "idle" {
+            setBubble("", autoClearAfter: nil)
         }
     }
 
@@ -313,6 +329,22 @@ final class PetOverlayController: NSObject {
         updateMouseTransparencyAndProximity()
     }
 
+    private func handleDrag(delta: NSPoint) {
+        isDraggingPet = true
+        let direction: PetDragDirection
+        if abs(delta.x) >= 0.5 {
+            direction = PetDragDirection(horizontalDelta: delta.x)
+        } else if let activeDragDirection {
+            direction = activeDragDirection
+        } else {
+            direction = .right
+        }
+
+        guard activeDragDirection != direction || !currentStateID.hasPrefix("running") else { return }
+        activeDragDirection = direction
+        handleDirectSignal(.dragged(direction: direction))
+    }
+
     private func applyCollectionBehavior() {
         var behavior: NSWindow.CollectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         if showsInFullScreen {
@@ -352,14 +384,12 @@ final class PetOverlayController: NSObject {
             return
         }
 
+        guard !isDraggingPet else { return }
+
         let screenPoint = NSEvent.mouseLocation
         let windowPoint = panel.convertPoint(fromScreen: screenPoint)
         let localPoint = rootView.convert(windowPoint, from: nil)
         let cursorOverInteractive = rootView.containsInteractivePoint(localPoint)
-
-        if panel.ignoresMouseEvents == cursorOverInteractive {
-            panel.ignoresMouseEvents = !cursorOverInteractive
-        }
 
         if cursorOverInteractive, !wasCursorOverInteractive {
             handleDirectSignal(.mouseEntered)
@@ -414,7 +444,7 @@ final class PetOverlayController: NSObject {
 final class PetOverlayView: NSView {
     var windowDragHandler: ((NSPoint) -> Void)?
     var clickHandler: ((Int) -> Void)?
-    var dragStartedHandler: (() -> Void)?
+    var dragMovedHandler: ((NSPoint) -> Void)?
     var dragEndedHandler: (() -> Void)?
     var bubbleActionHandler: (() -> Void)?
 
@@ -449,6 +479,10 @@ final class PetOverlayView: NSView {
         )
     }
 
+    var petBodyHitRect: NSRect {
+        pet == nil ? .zero : bounds
+    }
+
     var bubbleRect: NSRect {
         guard !bubbleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .zero }
         let paragraph = NSMutableParagraphStyle()
@@ -474,8 +508,7 @@ final class PetOverlayView: NSView {
     }
 
     func containsInteractivePoint(_ point: NSPoint) -> Bool {
-        let paddedSprite = spriteRect.insetBy(dx: -6, dy: -6)
-        if !paddedSprite.isEmpty, paddedSprite.contains(point) {
+        if containsPetBodyPoint(point) {
             return true
         }
 
@@ -487,6 +520,17 @@ final class PetOverlayView: NSView {
         }
 
         return false
+    }
+
+    func containsPetBodyPoint(_ point: NSPoint) -> Bool {
+        guard petBodyHitRect.contains(point) else { return false }
+        if bubbleActionHandler != nil {
+            let paddedBubble = bubbleRect.insetBy(dx: -6, dy: -6)
+            if !paddedBubble.isEmpty, paddedBubble.contains(point) {
+                return false
+            }
+        }
+        return true
     }
 
     func distanceFromSprite(to point: NSPoint) -> CGFloat {
@@ -554,11 +598,12 @@ final class PetOverlayView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        let delta = NSPoint(x: event.deltaX, y: event.deltaY)
         if !isDraggingPet {
             isDraggingPet = true
-            dragStartedHandler?()
         }
-        windowDragHandler?(NSPoint(x: event.deltaX, y: event.deltaY))
+        dragMovedHandler?(delta)
+        windowDragHandler?(delta)
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -573,6 +618,8 @@ final class PetOverlayView: NSView {
             needsDisplay = true
         case .playOnce:
             playOnce()
+        case .loop:
+            startActiveLoop()
         case let .loopFor(duration):
             loopFor(duration)
         case let .loopWithPause(active, pause):
