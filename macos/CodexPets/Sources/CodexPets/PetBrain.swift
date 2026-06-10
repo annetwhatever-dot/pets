@@ -115,12 +115,30 @@ enum PetMood: String, Equatable {
     case annoyed
 }
 
+enum PetDragDirection: Equatable {
+    case left
+    case right
+
+    init(horizontalDelta: CGFloat) {
+        self = horizontalDelta < 0 ? .left : .right
+    }
+
+    var stateID: String {
+        switch self {
+        case .left:
+            return "running-left"
+        case .right:
+            return "running-right"
+        }
+    }
+}
+
 enum PetSignal: Equatable {
     case idlePulse
     case mouseNear(distance: CGFloat)
     case mouseEntered
     case clicked(count: Int)
-    case dragged
+    case dragged(direction: PetDragDirection)
     case userInactive(seconds: TimeInterval)
     case userReturned
     case codexState(String)
@@ -131,6 +149,7 @@ enum PetSignal: Equatable {
 enum PetPlaybackMode: Equatable {
     case staticFrame(Int)
     case playOnce
+    case loop
     case loopFor(TimeInterval)
     case loopWithPause(active: TimeInterval, pause: ClosedRange<TimeInterval>)
 
@@ -139,6 +158,8 @@ enum PetPlaybackMode: Equatable {
         case let (.staticFrame(a), .staticFrame(b)):
             return a == b
         case (.playOnce, .playOnce):
+            return true
+        case (.loop, .loop):
             return true
         case let (.loopFor(a), .loopFor(b)):
             return abs(a - b) < 0.0001
@@ -210,9 +231,9 @@ final class PetBrain {
             return handleMouseEntered()
         case let .clicked(count):
             return handleClick(count: count)
-        case .dragged:
+        case let .dragged(direction):
             let bubble = murmur(for: .drag, mood: .happy)
-            return decision(mood: .happy, stateID: "jumping", duration: 1.2, bubble: bubble, playback: .playOnce)
+            return decision(mood: .happy, stateID: direction.stateID, duration: nil, bubble: bubble, playback: .loop)
         case let .userInactive(seconds):
             guard seconds >= 8 * 60 else { return nil }
             activeCodexState = "idle"

@@ -1,5 +1,6 @@
 const PETDEX_MANIFEST_V1 = "https://assets.petdex.dev/manifests/petdex-v1.json";
 const PETDEX_MANIFEST_V2 = "https://assets.petdex.dev/manifests/petdex-v2.json";
+const BUNDLED_PETDEX_MANIFEST = "petdex/manifest.json";
 const PETDEX_BASE = "https://assets.petdex.dev";
 const CUSTOM_DB = "codex-pets-app";
 const CUSTOM_STORE = "customPets";
@@ -94,6 +95,11 @@ const els = {
   manifestTotal: document.querySelector("#manifest-total"),
   visibleTotal: document.querySelector("#visible-total"),
   customCount: document.querySelector("#custom-count"),
+  daemonPanel: document.querySelector("#daemon-panel"),
+  daemonStatus: document.querySelector("#daemon-status"),
+  approvalCount: document.querySelector("#approval-count"),
+  approvalList: document.querySelector("#approval-list"),
+  sessionList: document.querySelector("#session-list"),
   selectedSource: document.querySelector("#selected-source"),
   selectedKind: document.querySelector("#selected-kind"),
   selectedName: document.querySelector("#selected-name"),
@@ -103,6 +109,7 @@ const els = {
   stateTabs: document.querySelector("#state-tabs"),
   installCommand: document.querySelector("#install-command"),
   copyCommand: document.querySelector("#copy-command"),
+  nativeImport: document.querySelector("#native-import"),
   openPetdex: document.querySelector("#open-petdex"),
   galleryStatus: document.querySelector("#gallery-status"),
   grid: document.querySelector("#pet-grid"),
@@ -116,6 +123,8 @@ const state = {
   manifestUrl: PETDEX_MANIFEST_V1,
   petdexPets: [],
   customPets: [],
+  installedPets: [],
+  daemonSnapshot: null,
   selected: null,
   selectedStateId: "idle",
   filterSource: "all",
@@ -130,7 +139,11 @@ init();
 async function init() {
   bindEvents();
   await loadCustomPets();
-  await loadManifest(state.manifestUrl);
+  if (window.location.protocol === "file:") {
+    await loadManifest(BUNDLED_PETDEX_MANIFEST, { fallbackUrl: state.manifestUrl });
+  } else {
+    await loadManifest(state.manifestUrl);
+  }
 }
 
 function bindEvents() {
@@ -165,6 +178,8 @@ function bindEvents() {
     renderGallery();
   });
 
+  els.grid.addEventListener("scroll", maybeLoadMore);
+
   els.shuffle.addEventListener("click", () => {
     const pets = filteredPets();
     if (pets.length === 0) return;
@@ -180,6 +195,29 @@ function bindEvents() {
     } catch {
       flashButton(els.copyCommand, "Copy failed");
     }
+  });
+
+  els.nativeImport?.addEventListener("click", importSelectedInNative);
+
+  window.addEventListener("codex-pets-native-ready", updateNativeControls);
+  window.addEventListener("codex-pets-native-ready", requestNativeInstalledPets);
+  window.addEventListener("codex-pets-native-ready", requestNativeDaemonSnapshot);
+  window.addEventListener("codex-pets-native-import-result", (event) => {
+    const detail = event.detail || {};
+    setImportStatus(detail.message || (detail.ok ? "Imported" : "Import failed"));
+    requestNativeInstalledPets();
+    requestNativeDaemonSnapshot();
+    updateNativeControls();
+  });
+  window.addEventListener("codex-pets-native-installed-pets", (event) => {
+    const pets = Array.isArray(event.detail?.pets) ? event.detail.pets : [];
+    state.installedPets = pets.map(normalizePet).filter(Boolean);
+    renderGallery();
+    updateNativeControls();
+  });
+  window.addEventListener("codex-pets-native-daemon-snapshot", (event) => {
+    state.daemonSnapshot = normalizeDaemonSnapshot(event.detail || {});
+    renderDaemonSnapshot();
   });
 
   els.folderInput.addEventListener("change", async () => {
@@ -198,8 +236,8 @@ function bindEvents() {
   });
 }
 
-async function loadManifest(url) {
-  setGalleryStatus("Loading Petdex...");
+async function loadManifest(url, options = {}) {
+  if (!hasAnyPets()) setGalleryStatus("Loading Petdex...");
   state.manifestUrl = url;
   els.manifestUrl.value = url;
 
@@ -217,13 +255,22 @@ async function loadManifest(url) {
       if (preferred) selectPet(preferred);
     }
     renderGallery();
+    return true;
   } catch (error) {
+    if (options.fallbackUrl && options.fallbackUrl !== url) {
+      return loadManifest(options.fallbackUrl);
+    }
     setGalleryStatus(error.message || "Could not load manifest");
     if (url !== PETDEX_MANIFEST_V2) {
       els.manifestUrl.value = PETDEX_MANIFEST_V2;
     }
     renderGallery();
+    return false;
   }
+}
+
+function hasAnyPets() {
+  return state.installedPets.length > 0 || state.customPets.length > 0 || state.petdexPets.length > 0;
 }
 
 function normalizeManifest(raw) {
@@ -281,7 +328,12 @@ function normalizePet(input) {
     spritesheetUrl,
     petJsonUrl: cleanString(input.petJsonUrl),
     zipUrl: cleanString(input.zipUrl),
+    remoteSpritesheetUrl: cleanString(input.remoteSpritesheetUrl),
+    remotePetJsonUrl: cleanString(input.remotePetJsonUrl),
+    remoteZipUrl: cleanString(input.remoteZipUrl),
     petJson: input.petJson || null,
+    nativePetId: cleanString(input.nativePetId),
+    canUninstall: Boolean(input.canUninstall),
     frameWidth: positiveNumber(input.frameWidth) || 192,
     frameHeight: positiveNumber(input.frameHeight) || 208,
     states: normalizeStates(input.petJson || input),
@@ -342,19 +394,22 @@ function renderSelected() {
   const selectedState =
     pet.states.find((item) => item.id === state.selectedStateId) ?? pet.states[0];
 
-  els.selectedSource.textContent = pet.source === "custom" ? "Custom" : "Petdex";
+  els.selectedSource.textContent =
+    pet.source === "custom" ? "Custom" : pet.source === "installed" ? "Installed" : "Petdex";
   els.selectedKind.textContent = pet.kind;
   els.selectedName.textContent = pet.displayName;
   els.selectedDescription.textContent = pet.description || "Animated Codex pet.";
   els.installCommand.textContent =
     pet.source === "custom"
       ? `custom pet: ${pet.slug}`
+      : pet.source === "installed"
+        ? `installed pet: ${pet.slug}`
       : `npx petdex install ${pet.slug}`;
   els.openPetdex.href =
-    pet.source === "custom"
+    pet.source === "custom" || pet.source === "installed"
       ? "https://github.com/crafter-station/petdex"
       : `https://petdex.dev/pets/${encodeURIComponent(pet.slug)}`;
-  els.openPetdex.textContent = pet.source === "custom" ? "Format" : "Petdex";
+  els.openPetdex.textContent = pet.source === "custom" || pet.source === "installed" ? "Format" : "Petdex";
 
   els.selectedTags.replaceChildren(
     ...pet.tags.slice(0, 8).map((tag) => {
@@ -381,6 +436,8 @@ function renderSelected() {
       return button;
     }),
   );
+
+  updateNativeControls();
 }
 
 function responsiveSpriteScale() {
@@ -398,17 +455,92 @@ function renderGallery() {
   els.customCount.textContent = String(state.customPets.length);
 
   els.grid.replaceChildren(...visible.map(createPetCard));
-  els.loadMore.hidden = visible.length >= pets.length;
+  els.loadMore.hidden = true;
 
   if (pets.length === 0) {
     setGalleryStatus("No pets match");
+  } else if (visible.length < pets.length) {
+    setGalleryStatus(
+      `${formatCount(visible.length)} of ${formatCount(pets.length)} match${
+        pets.length === 1 ? "" : "es"
+      }`,
+    );
   } else {
     setGalleryStatus(`${formatCount(pets.length)} match${pets.length === 1 ? "" : "es"}`);
   }
 }
 
+function maybeLoadMore() {
+  const pets = filteredPets();
+  if (state.visibleLimit >= pets.length) return;
+  const remaining = els.grid.scrollHeight - els.grid.scrollTop - els.grid.clientHeight;
+  if (remaining > 180) return;
+  state.visibleLimit += PAGE_SIZE;
+  renderGallery();
+}
+
+function renderDaemonSnapshot() {
+  if (!els.daemonPanel) return;
+  const snapshot = state.daemonSnapshot;
+  if (!snapshot) {
+    els.daemonStatus.textContent = "Waiting for Pi status...";
+    els.approvalCount.textContent = "0";
+    els.approvalList.replaceChildren();
+    els.sessionList.replaceChildren();
+    return;
+  }
+
+  const pendingApprovals = snapshot.pendingApprovals.filter(
+    (approval) => approval.state === "pending",
+  );
+  els.approvalCount.textContent = String(pendingApprovals.length);
+  els.daemonStatus.textContent = `${snapshot.attention.replace(/_/g, " ")} · ${
+    snapshot.sessions.length
+  } session${snapshot.sessions.length === 1 ? "" : "s"}`;
+  els.approvalList.replaceChildren(...pendingApprovals.map(createApprovalRow));
+  els.sessionList.replaceChildren(...snapshot.sessions.slice(0, 5).map(createSessionRow));
+}
+
+function createApprovalRow(approval) {
+  const row = document.createElement("div");
+  row.className = "approval-row";
+
+  const summary = document.createElement("span");
+  summary.textContent = approval.commandSummary || approval.toolName || "Approval needed";
+
+  const actions = document.createElement("span");
+  actions.className = "approval-actions";
+
+  const approve = document.createElement("button");
+  approve.type = "button";
+  approve.className = "text-button";
+  approve.textContent = "Approve";
+  approve.addEventListener("click", () => respondToApproval(approval.id, "approved"));
+
+  const deny = document.createElement("button");
+  deny.type = "button";
+  deny.className = "text-button";
+  deny.textContent = "Deny";
+  deny.addEventListener("click", () => respondToApproval(approval.id, "denied"));
+
+  actions.append(approve, deny);
+  row.append(summary, actions);
+  return row;
+}
+
+function createSessionRow(session) {
+  const row = document.createElement("div");
+  row.className = "session-row";
+  const name = document.createElement("strong");
+  name.textContent = session.title || basenameFromPath(session.cwd) || session.id;
+  const meta = document.createElement("span");
+  meta.textContent = `${session.status}${session.safeSummary ? ` · ${session.safeSummary}` : ""}`;
+  row.append(name, meta);
+  return row;
+}
+
 function filteredPets() {
-  const combined = [...state.customPets, ...state.petdexPets];
+  const combined = [...state.installedPets, ...state.customPets, ...state.petdexPets];
   return combined.filter((pet) => {
     if (state.filterSource !== "all" && pet.source !== state.filterSource) {
       return false;
@@ -438,7 +570,10 @@ function createPetCard(pet) {
   const cardState = pet.states[hashString(pet.slug) % pet.states.length];
 
   name.textContent = pet.displayName;
-  meta.textContent = pet.source === "custom" ? pet.slug : pet.submittedBy || pet.kind;
+  meta.textContent =
+    pet.source === "custom" || pet.source === "installed"
+      ? pet.submittedBy || pet.slug
+      : pet.submittedBy || pet.kind;
   spriteSlot.append(createSpriteElement(pet, cardState, { scale: 0.44, animated: false }));
   button.classList.toggle("is-selected", state.selected?.slug === pet.slug);
   button.addEventListener("click", () => selectPet(pet));
@@ -452,6 +587,19 @@ function createPetCard(pet) {
     remove.addEventListener("click", async (event) => {
       event.stopPropagation();
       await deleteCustomPet(pet.slug);
+    });
+    card.append(remove);
+  }
+
+  if (pet.source === "installed" && pet.canUninstall) {
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "pet-remove";
+    remove.title = "Remove installed pet";
+    remove.textContent = "x";
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      uninstallInstalledPet(pet);
     });
     card.append(remove);
   }
@@ -785,6 +933,159 @@ function hashString(value) {
 
 function cssEscapeUrl(value) {
   return String(value).replace(/"/g, '\\"');
+}
+
+function nativeBridgeAvailable() {
+  return Boolean(
+    window.CodexPetsNative?.postMessage ||
+      window.webkit?.messageHandlers?.codexPets?.postMessage,
+  );
+}
+
+function requestNativeInstalledPets() {
+  postNativeMessage({ action: "listInstalledPets" });
+}
+
+function requestNativeDaemonSnapshot() {
+  postNativeMessage({ action: "getDaemonSnapshot" });
+}
+
+function respondToApproval(approvalId, decision) {
+  if (!approvalId || !decision) return;
+  setImportStatus(decision === "approved" ? "Approving command..." : "Denying command...");
+  postNativeMessage({
+    action: "approvalDecision",
+    approvalId,
+    decision,
+  });
+}
+
+function postNativeMessage(payload) {
+  if (window.CodexPetsNative?.postMessage) {
+    window.CodexPetsNative.postMessage(payload);
+    return true;
+  }
+  if (window.webkit?.messageHandlers?.codexPets?.postMessage) {
+    window.webkit.messageHandlers.codexPets.postMessage(payload);
+    return true;
+  }
+  return false;
+}
+
+function updateNativeControls() {
+  const isNative = nativeBridgeAvailable();
+  document.documentElement.classList.toggle("native-shell", isNative);
+  if (!els.nativeImport) return;
+
+  const canImport = isNative && state.selected?.source === "petdex";
+  const canSelectInstalled = isNative && state.selected?.source === "installed";
+  els.nativeImport.hidden = !isNative;
+  els.nativeImport.disabled = !(canImport || canSelectInstalled);
+  els.nativeImport.textContent = canSelectInstalled ? "Use Pet" : "Import & Use";
+}
+
+function importSelectedInNative() {
+  if (!state.selected) return;
+  if (state.selected.source === "installed") {
+    setImportStatus(`Selecting ${state.selected.displayName}...`);
+    els.nativeImport.disabled = true;
+    postNativeMessage({
+      action: "selectInstalledPet",
+      petId: state.selected.nativePetId,
+    });
+    return;
+  }
+  if (state.selected.source !== "petdex") return;
+  setImportStatus(`Importing ${state.selected.displayName}...`);
+  els.nativeImport.disabled = true;
+
+  const sent = postNativeMessage({
+    action: "importPet",
+    pet: nativePetPayload(state.selected),
+  });
+
+  if (!sent) {
+    setImportStatus("Native import is unavailable");
+    updateNativeControls();
+  }
+}
+
+function uninstallInstalledPet(pet) {
+  if (!pet?.nativePetId) return;
+  setImportStatus(`Removing ${pet.displayName}...`);
+  postNativeMessage({
+    action: "uninstallInstalledPet",
+    petId: pet.nativePetId,
+  });
+}
+
+function nativePetPayload(pet) {
+  return {
+    slug: pet.slug,
+    displayName: pet.displayName,
+    description: pet.description,
+    kind: pet.kind,
+    submittedBy: pet.submittedBy,
+    tags: pet.tags,
+    spritesheetUrl: absoluteAssetURL(pet.remoteSpritesheetUrl || pet.spritesheetUrl),
+    petJsonUrl: absoluteAssetURL(pet.remotePetJsonUrl || pet.petJsonUrl),
+    zipUrl: absoluteAssetURL(pet.remoteZipUrl || pet.zipUrl),
+    frameWidth: pet.frameWidth,
+    frameHeight: pet.frameHeight,
+  };
+}
+
+function absoluteAssetURL(value) {
+  if (!value) return "";
+  try {
+    return new URL(value, document.baseURI).href;
+  } catch {
+    return value;
+  }
+}
+
+function normalizeDaemonSnapshot(raw) {
+  return {
+    attention: cleanString(raw.attention) || "idle",
+    sessions: Array.isArray(raw.sessions)
+      ? raw.sessions.map(normalizeDaemonSession).filter(Boolean)
+      : [],
+    pendingApprovals: Array.isArray(raw.pendingApprovals)
+      ? raw.pendingApprovals.map(normalizePendingApproval).filter(Boolean)
+      : [],
+    selectedPetId: cleanString(raw.selectedPetId),
+  };
+}
+
+function normalizeDaemonSession(raw) {
+  const id = cleanString(raw.id);
+  if (!id) return null;
+  return {
+    id,
+    cwd: cleanString(raw.cwd),
+    title: cleanString(raw.title),
+    status: cleanString(raw.status) || "idle",
+    safeSummary: cleanString(raw.safeSummary),
+  };
+}
+
+function normalizePendingApproval(raw) {
+  const id = cleanString(raw.id);
+  if (!id) return null;
+  return {
+    id,
+    sessionId: cleanString(raw.sessionId),
+    toolName: cleanString(raw.toolName),
+    commandSummary: cleanString(raw.commandSummary),
+    risk: cleanString(raw.risk),
+    state: cleanString(raw.state) || "pending",
+  };
+}
+
+function basenameFromPath(value) {
+  const text = cleanString(value);
+  if (!text) return "";
+  return text.split("/").filter(Boolean).pop() || text;
 }
 
 function setGalleryStatus(message) {

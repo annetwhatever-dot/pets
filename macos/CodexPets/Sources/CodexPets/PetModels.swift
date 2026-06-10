@@ -128,6 +128,14 @@ final class PetStore {
         return try loadPet(at: destination, source: .app)
     }
 
+    func uninstallImportedPet(_ pet: PetPackage) throws {
+        guard pet.source == .app else { return }
+        let rootPath = importedPetsRoot.standardizedFileURL.path
+        let petPath = pet.directory.standardizedFileURL.path
+        guard petPath.hasPrefix(rootPath + "/") else { return }
+        try fileManager.removeItem(at: pet.directory)
+    }
+
     func importDownloadedPetdexPet(
         _ entry: PetdexCatalogEntry,
         petJSON: Data,

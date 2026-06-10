@@ -12,36 +12,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let store = PetStore()
     private let overlay = PetOverlayController()
     private var server: StateServer?
+    private var inAppDaemon: InAppDaemon?
+    private var daemonClient: DaemonClient?
     private var statusItem: NSStatusItem?
     private var petdexBrowser: PetdexBrowserWindowController?
+    private var guiSmokeRecorder: GUISmokeRecorder?
     private var pets: [PetPackage] = []
     private var selectedPetID: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        guiSmokeRecorder = GUISmokeRecorder.fromEnvironment()
+        guiSmokeRecorder?.recordLaunch()
 
         pets = store.scan()
 
         setupStatusItem()
         loadOverlaySettings()
-        server = StateServer(
-            runtimeRoot: store.runtimeRoot,
-            onState: { [weak self] state, duration in
-                self?.overlay.setState(state, duration: duration)
-            },
-            onBubble: { [weak self] text in
+        if StateServer.isDebugEnabled {
+            server = StateServer(
+                runtimeRoot: store.runtimeRoot,
+                onState: { [weak self] state, duration in
+                    self?.overlay.setState(state, duration: duration)
+                },
+                onBubble: { [weak self] text in
                 self?.overlay.setBubble(text)
             },
             onEvent: { [weak self] type, label, importance in
-                self?.overlay.setEvent(type: type, label: label, importance: importance)
-            }
-        )
-        server?.start()
+                    self?.overlay.setEvent(type: type, label: label, importance: importance)
+                }
+            )
+            server?.start()
+        }
+
+        let daemonSocketPath = DaemonClient.defaultSocketPath()
+        inAppDaemon = InAppDaemon(socketPath: daemonSocketPath)
+        inAppDaemon?.start()
+
+        daemonClient = DaemonClient(socketPath: daemonSocketPath)
+        daemonClient?.startSnapshotSubscription { [weak self] snapshot in
+            self?.applyDaemonSnapshot(snapshot)
+        }
+
+        petdexBrowser = makePetdexBrowser()
+        petdexBrowser?.prepareForDisplay()
 
         if let first = pets.first {
             selectPet(first)
         }
+        publishInstalledPetsToDaemon()
         rebuildMenu()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        daemonClient?.stop()
+        inAppDaemon?.stop()
     }
 
     private func setupStatusItem() {
@@ -92,10 +117,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hello.isEnabled = selectedPetID != nil
         menu.addItem(hello)
 
-        let curl = NSMenuItem(title: "Copy State API Curl", action: #selector(copyStateCurl), keyEquivalent: "")
-        curl.target = self
-        curl.isEnabled = server != nil
-        menu.addItem(curl)
+        if server != nil {
+            let curl = NSMenuItem(title: "Copy Debug State API Curl", action: #selector(copyStateCurl), keyEquivalent: "")
+            curl.target = self
+            menu.addItem(curl)
+        }
 
         let storage = NSMenuItem(title: "Open Storage Folder", action: #selector(openStorageFolder), keyEquivalent: "")
         storage.target = self
@@ -244,10 +270,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return item
     }
 
-    private func selectPet(_ pet: PetPackage) {
+    private func selectPet(_ pet: PetPackage, publish: Bool = true) {
         selectedPetID = pet.id
         overlay.setPet(pet)
         overlay.setBubble("")
+        if publish {
+            daemonClient?.selectPet(pet.id)
+        }
         rebuildMenu()
     }
 
@@ -258,17 +287,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openPetdexBrowser() {
         if petdexBrowser == nil {
-            petdexBrowser = PetdexBrowserWindowController(store: store) { [weak self] pet in
-                guard let self else { return }
-                self.pets = self.store.scan()
-                self.selectPet(self.pets.first { $0.directory.path == pet.directory.path } ?? pet)
-                self.overlay.setBubble("Imported \(pet.displayName)")
-            }
-            petdexBrowser?.window?.isReleasedWhenClosed = false
+            petdexBrowser = makePetdexBrowser()
         }
+        petdexBrowser?.prepareForDisplay()
         NSApp.activate(ignoringOtherApps: true)
         petdexBrowser?.showWindow(nil)
         petdexBrowser?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func makePetdexBrowser() -> PetdexBrowserWindowController {
+        let controller = PetdexBrowserWindowController(
+            store: store,
+            installedPetsProvider: { [weak self] in
+                self?.pets ?? []
+            },
+            onImport: { [weak self] pet in
+                guard let self else { return }
+                self.pets = self.store.scan()
+                self.selectPet(self.pets.first { $0.directory.path == pet.directory.path } ?? pet)
+                self.publishInstalledPetsToDaemon()
+                self.overlay.setBubble("Imported \(pet.displayName)")
+            },
+            onSelectInstalled: { [weak self] pet in
+                guard let self else { return }
+                self.selectPet(pet)
+                self.publishInstalledPetsToDaemon()
+            },
+            onUninstallInstalled: { [weak self] pet in
+                guard let self else { return }
+                do {
+                    try self.store.uninstallImportedPet(pet)
+                    self.pets = self.store.scan()
+                    if self.selectedPetID == pet.id {
+                        if let first = self.pets.first {
+                            self.selectPet(first)
+                        } else {
+                            self.selectedPetID = nil
+                            self.overlay.setPet(nil)
+                        }
+                    }
+                    self.publishInstalledPetsToDaemon()
+                    self.rebuildMenu()
+                } catch {
+                    self.showError(error)
+                }
+            },
+            daemonSnapshotProvider: { [weak self] completion in
+                guard let daemonClient = self?.daemonClient else {
+                    completion(nil)
+                    return
+                }
+                daemonClient.getSnapshot(completion: completion)
+            },
+            onApprovalDecision: { [weak self] approvalID, decision in
+                self?.daemonClient?.respondToApproval(approvalID: approvalID, decision: decision)
+            }
+        )
+        controller.window?.isReleasedWhenClosed = false
+        return controller
     }
 
     @objc private func importPetFolder() {
@@ -290,6 +366,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let pet = try store.importPetFolder(url)
             pets = store.scan()
             selectPet(pets.first { $0.directory.path == pet.directory.path } ?? pet)
+            publishInstalledPetsToDaemon()
             overlay.setBubble("Imported \(pet.displayName)")
         } catch {
             showError(error)
@@ -308,6 +385,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             overlay.setPet(nil)
             overlay.hide()
         }
+        publishInstalledPetsToDaemon()
         rebuildMenu()
     }
 
@@ -405,6 +483,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.runModal()
     }
 
+    private func applyDaemonSnapshot(_ snapshot: DaemonSnapshot) {
+        if let selectedPetID = snapshot.selectedPetId,
+           selectedPetID != self.selectedPetID,
+           let selected = pets.first(where: { $0.id == selectedPetID })
+        {
+            selectPet(selected, publish: false)
+        }
+        let presentation = DaemonSnapshotPresenter.presentation(for: snapshot)
+        overlay.applyDaemonSnapshot(snapshot)
+        petdexBrowser?.publishDaemonSnapshot(snapshot)
+        guiSmokeRecorder?.recordSnapshot(snapshot, presentation: presentation, overlayState: overlay.currentStateID)
+    }
+
+    private func publishInstalledPetsToDaemon() {
+        daemonClient?.publishInstalledPets(pets)
+        if let selectedPetID {
+            daemonClient?.selectPet(selectedPetID)
+        }
+    }
+
     private func loadOverlaySettings() {
         let defaults = UserDefaults.standard
         let attentionMode = PetAttentionMode(rawValue: defaults.string(forKey: DefaultsKey.attentionMode) ?? "") ?? .default
@@ -420,5 +518,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alwaysReduceMotion: alwaysReduceMotion,
             showsInFullScreen: showsInFullScreen
         )
+    }
+}
+
+final class GUISmokeRecorder {
+    private let url: URL
+    private let queue = DispatchQueue(label: "CodexPets.GUISmokeRecorder")
+    private let dateFormatter = ISO8601DateFormatter()
+
+    private init(url: URL) {
+        self.url = url
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+    }
+
+    static func fromEnvironment() -> GUISmokeRecorder? {
+        guard
+            let path = ProcessInfo.processInfo.environment["CODEX_PETS_GUI_SMOKE_FILE"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !path.isEmpty
+        else {
+            return nil
+        }
+        return GUISmokeRecorder(url: URL(fileURLWithPath: path))
+    }
+
+    func recordLaunch() {
+        write([
+            "event": "launch",
+            "pid": ProcessInfo.processInfo.processIdentifier,
+        ])
+    }
+
+    func recordSnapshot(_ snapshot: DaemonSnapshot, presentation: DaemonOverlayPresentation, overlayState: String) {
+        write([
+            "event": "snapshot",
+            "attention": snapshot.attention,
+            "stateID": presentation.stateID,
+            "overlayState": overlayState,
+            "bubble": presentation.bubble ?? "",
+            "sessions": snapshot.sessions.count,
+            "pendingApprovals": snapshot.pendingApprovals.count,
+            "installedPets": snapshot.installedPets.count,
+            "selectedPetId": snapshot.selectedPetId ?? "",
+        ])
+    }
+
+    private func write(_ fields: [String: Any]) {
+        queue.async { [url, dateFormatter] in
+            var object = fields
+            object["timestamp"] = dateFormatter.string(from: Date())
+            guard
+                JSONSerialization.isValidJSONObject(object),
+                var data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            else {
+                return
+            }
+            data.append(0x0a)
+            guard let handle = try? FileHandle(forWritingTo: url) else { return }
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            _ = try? handle.write(contentsOf: data)
+        }
     }
 }

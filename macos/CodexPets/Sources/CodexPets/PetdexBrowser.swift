@@ -1,5 +1,6 @@
 import Cocoa
 import Foundation
+import WebKit
 
 struct PetdexCatalogEntry: Equatable {
     let slug: String
@@ -209,6 +210,64 @@ enum PetdexManifestParser {
     }
 }
 
+enum PetdexCatalogSearch {
+    static func filter(_ entries: [PetdexCatalogEntry], query rawQuery: String) -> [PetdexCatalogEntry] {
+        let tokens = searchTokens(rawQuery)
+        guard !tokens.isEmpty else { return entries }
+
+        return entries.compactMap { entry -> (entry: PetdexCatalogEntry, score: Int)? in
+            guard let score = score(entry, tokens: tokens) else { return nil }
+            return (entry, score)
+        }
+        .sorted { left, right in
+            if left.score != right.score { return left.score > right.score }
+            return left.entry.displayName.localizedCaseInsensitiveCompare(right.entry.displayName) == .orderedAscending
+        }
+        .map(\.entry)
+    }
+
+    private static func score(_ entry: PetdexCatalogEntry, tokens: [String]) -> Int? {
+        let weightedFields: [(text: String, weight: Int)] = [
+            (entry.displayName, 100),
+            (entry.slug, 80),
+            (entry.tags.joined(separator: " "), 65),
+            (entry.kind, 45),
+            (entry.submittedBy, 35),
+            (entry.detail, 20),
+        ]
+        let normalizedFields = weightedFields.map { (normalize($0.text), $0.weight) }
+        var total = 0
+
+        for token in tokens {
+            let best = normalizedFields
+                .filter { field, _ in field.contains(token) }
+                .map(\.1)
+                .max()
+            guard let best else { return nil }
+            total += best
+        }
+
+        return total
+    }
+
+    private static func searchTokens(_ value: String) -> [String] {
+        normalize(value)
+            .split(separator: " ")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+    }
+
+    private static func normalize(_ value: String) -> String {
+        let folded = value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        let scalars = folded.unicodeScalars.map { scalar -> Character in
+            CharacterSet.alphanumerics.contains(scalar) ? Character(scalar) : " "
+        }
+        return String(scalars)
+            .split(separator: " ")
+            .joined(separator: " ")
+    }
+}
+
 private extension Array {
     subscript(safe index: Int) -> Element? {
         indices.contains(index) ? self[index] : nil
@@ -310,269 +369,108 @@ enum PetdexNetworkError: Error, LocalizedError {
     }
 }
 
-final class PetdexBrowserWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
-    private let store: PetStore
-    private let client: PetdexCatalogClient
-    private let onImport: (PetPackage) -> Void
+enum PetdexPreviewError: Error, LocalizedError {
+    case invalidImage
 
-    private var entries: [PetdexCatalogEntry] = []
-    private var filteredEntries: [PetdexCatalogEntry] = []
-    private var selectedEntry: PetdexCatalogEntry?
-    private var previewTask: URLSessionDataTask?
-
-    private let searchField = NSSearchField(frame: .zero)
-    private let refreshButton = NSButton(title: "Refresh", target: nil, action: nil)
-    private let importButton = NSButton(title: "Import & Use", target: nil, action: nil)
-    private let openButton = NSButton(title: "Open Petdex", target: nil, action: nil)
-    private let statusLabel = NSTextField(labelWithString: "Loading Petdex…")
-    private let tableView = NSTableView(frame: .zero)
-    private let imageView = NSImageView(frame: .zero)
-    private let nameLabel = NSTextField(labelWithString: "Select a pet")
-    private let detailLabel = NSTextField(wrappingLabelWithString: "")
-    private let metaLabel = NSTextField(labelWithString: "")
-
-    init(
-        store: PetStore,
-        client: PetdexCatalogClient = PetdexCatalogClient(),
-        onImport: @escaping (PetPackage) -> Void
-    ) {
-        self.store = store
-        self.client = client
-        self.onImport = onImport
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 860, height: 560),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Browse Petdex"
-        window.minSize = NSSize(width: 700, height: 460)
-        super.init(window: window)
-        setupUI()
-        loadCatalog()
-    }
-
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    deinit {
-        previewTask?.cancel()
-    }
-
-    func numberOfRows(in tableView: NSTableView) -> Int {
-        filteredEntries.count
-    }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard filteredEntries.indices.contains(row) else { return nil }
-        let entry = filteredEntries[row]
-        let identifier = NSUserInterfaceItemIdentifier("PetdexCell")
-        let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView ?? NSTableCellView()
-        cell.identifier = identifier
-        let textField = cell.textField ?? NSTextField(labelWithString: "")
-        textField.lineBreakMode = .byTruncatingTail
-        textField.font = NSFont.systemFont(ofSize: 13, weight: tableColumn?.identifier.rawValue == "name" ? .semibold : .regular)
-        textField.stringValue = value(for: tableColumn?.identifier.rawValue ?? "name", entry: entry)
-        if cell.textField == nil {
-            cell.textField = textField
-            cell.addSubview(textField)
-            textField.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                textField.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
-                textField.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
-                textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            ])
-        }
-        return cell
-    }
-
-    func tableViewSelectionDidChange(_ notification: Notification) {
-        let row = tableView.selectedRow
-        selectedEntry = filteredEntries.indices.contains(row) ? filteredEntries[row] : nil
-        renderSelectedEntry()
-    }
-
-    func controlTextDidChange(_ obj: Notification) {
-        applyFilter()
-    }
-
-    private func setupUI() {
-        guard let contentView = window?.contentView else { return }
-
-        searchField.placeholderString = "Search Petdex pets"
-        searchField.delegate = self
-        refreshButton.target = self
-        refreshButton.action = #selector(refreshCatalog)
-        importButton.target = self
-        importButton.action = #selector(importSelectedPet)
-        importButton.isEnabled = false
-        openButton.target = self
-        openButton.action = #selector(openSelectedPetdexPage)
-        openButton.isEnabled = false
-
-        statusLabel.textColor = .secondaryLabelColor
-        detailLabel.textColor = .secondaryLabelColor
-        detailLabel.maximumNumberOfLines = 4
-        metaLabel.textColor = .secondaryLabelColor
-        imageView.imageScaling = .scaleProportionallyUpOrDown
-        imageView.wantsLayer = true
-        imageView.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        imageView.layer?.cornerRadius = 12
-
-        tableView.delegate = self
-        tableView.dataSource = self
-        tableView.rowHeight = 30
-        tableView.headerView = nil
-        tableView.addTableColumn(column("name", title: "Name", width: 220))
-        tableView.addTableColumn(column("kind", title: "Kind", width: 90))
-        tableView.addTableColumn(column("by", title: "By", width: 120))
-        let scrollView = NSScrollView()
-        scrollView.documentView = tableView
-        scrollView.hasVerticalScroller = true
-        scrollView.borderType = .bezelBorder
-
-        let toolbar = NSStackView(views: [searchField, refreshButton])
-        toolbar.orientation = .horizontal
-        toolbar.spacing = 8
-        toolbar.alignment = .centerY
-        searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
-
-        let details = NSStackView(views: [imageView, nameLabel, metaLabel, detailLabel, importButton, openButton])
-        details.orientation = .vertical
-        details.spacing = 10
-        details.alignment = .leading
-        imageView.widthAnchor.constraint(equalToConstant: 240).isActive = true
-        imageView.heightAnchor.constraint(equalToConstant: 240).isActive = true
-        nameLabel.font = NSFont.systemFont(ofSize: 22, weight: .bold)
-        importButton.bezelStyle = .rounded
-        openButton.bezelStyle = .rounded
-
-        let body = NSStackView(views: [scrollView, details])
-        body.orientation = .horizontal
-        body.spacing = 16
-        body.alignment = .top
-        scrollView.widthAnchor.constraint(greaterThanOrEqualToConstant: 420).isActive = true
-
-        let root = NSStackView(views: [toolbar, body, statusLabel])
-        root.orientation = .vertical
-        root.spacing = 12
-        root.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
-        root.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(root)
-        NSLayoutConstraint.activate([
-            root.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            root.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            root.topAnchor.constraint(equalTo: contentView.topAnchor),
-            root.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-        ])
-    }
-
-    private func column(_ id: String, title: String, width: CGFloat) -> NSTableColumn {
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
-        column.title = title
-        column.width = width
-        column.resizingMask = .autoresizingMask
-        return column
-    }
-
-    private func value(for column: String, entry: PetdexCatalogEntry) -> String {
-        switch column {
-        case "kind": return entry.kind
-        case "by": return entry.submittedBy.isEmpty ? "Petdex" : entry.submittedBy
-        default: return entry.displayName
+    var errorDescription: String? {
+        switch self {
+        case .invalidImage: return "Petdex preview image could not be decoded."
         }
     }
+}
 
-    private func loadCatalog() {
-        setStatus("Loading Petdex…")
-        refreshButton.isEnabled = false
-        client.loadCatalog { [weak self] result in
+protocol PetdexPreviewCancellable {
+    func cancel()
+}
+
+extension URLSessionDataTask: PetdexPreviewCancellable {}
+
+final class PetdexPreviewCache {
+    private let cache = NSCache<NSString, NSImage>()
+
+    init(countLimit: Int = 96) {
+        cache.countLimit = countLimit
+    }
+
+    func image(for entry: PetdexCatalogEntry) -> NSImage? {
+        cache.object(forKey: key(for: entry))
+    }
+
+    func store(_ image: NSImage, for entry: PetdexCatalogEntry) {
+        cache.setObject(image, forKey: key(for: entry))
+    }
+
+    private func key(for entry: PetdexCatalogEntry) -> NSString {
+        "\(entry.spritesheetURL.absoluteString)#\(entry.frameWidth)x\(entry.frameHeight)" as NSString
+    }
+}
+
+final class PetdexPreviewLoader {
+    private let session: URLSession
+    private let cache: PetdexPreviewCache
+    private let decodeQueue = DispatchQueue(label: "dev.petdex.codex-pets.preview", qos: .userInitiated)
+
+    init(session: URLSession = .shared, cache: PetdexPreviewCache = PetdexPreviewCache()) {
+        self.session = session
+        self.cache = cache
+    }
+
+    @discardableResult
+    func loadPreview(
+        for entry: PetdexCatalogEntry,
+        completion: @escaping (Result<NSImage, Error>) -> Void
+    ) -> PetdexPreviewCancellable? {
+        if let image = cache.image(for: entry) {
             DispatchQueue.main.async {
-                guard let self else { return }
-                self.refreshButton.isEnabled = true
-                switch result {
-                case let .success(entries):
-                    self.entries = entries
-                    self.applyFilter(selectFirst: true)
-                    self.setStatus("Loaded \(entries.count) Petdex pets")
-                case let .failure(error):
-                    self.entries = []
-                    self.applyFilter(selectFirst: false)
-                    self.setStatus(error.localizedDescription)
-                }
+                completion(.success(image))
             }
-        }
-    }
-
-    private func applyFilter(selectFirst: Bool = false) {
-        let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if query.isEmpty {
-            filteredEntries = entries
-        } else {
-            filteredEntries = entries.filter { entry in
-                [entry.displayName, entry.slug, entry.kind, entry.submittedBy, entry.detail]
-                    .joined(separator: " ")
-                    .lowercased()
-                    .contains(query)
-                    || entry.tags.joined(separator: " ").lowercased().contains(query)
-            }
-        }
-        tableView.reloadData()
-        if selectFirst, !filteredEntries.isEmpty {
-            tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-        } else if let selectedEntry,
-                  let index = filteredEntries.firstIndex(of: selectedEntry)
-        {
-            tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
-        } else {
-            tableView.deselectAll(nil)
-            self.selectedEntry = nil
-            renderSelectedEntry()
-        }
-        setStatus("\(filteredEntries.count) of \(entries.count) Petdex pets")
-    }
-
-    private func renderSelectedEntry() {
-        guard let entry = selectedEntry else {
-            nameLabel.stringValue = "Select a pet"
-            metaLabel.stringValue = ""
-            detailLabel.stringValue = ""
-            imageView.image = nil
-            importButton.isEnabled = false
-            openButton.isEnabled = false
-            return
+            return nil
         }
 
-        nameLabel.stringValue = entry.displayName
-        metaLabel.stringValue = [entry.kind, entry.submittedBy].filter { !$0.isEmpty }.joined(separator: " • ")
-        detailLabel.stringValue = entry.detail
-        importButton.isEnabled = true
-        openButton.isEnabled = entry.petdexURL != nil
-        loadPreview(for: entry)
-    }
-
-    private func loadPreview(for entry: PetdexCatalogEntry) {
-        previewTask?.cancel()
-        imageView.image = nil
         var request = URLRequest(url: entry.spritesheetURL)
+        request.cachePolicy = .returnCacheDataElseLoad
+        request.timeoutInterval = 15
         request.setValue("CodexPets/1.0", forHTTPHeaderField: "User-Agent")
-        previewTask = URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
-            guard let self,
-                  let data,
-                  let image = NSImage(data: data)
-            else { return }
-            let preview = Self.firstFrameImage(from: image, frameWidth: entry.frameWidth, frameHeight: entry.frameHeight)
-            DispatchQueue.main.async {
-                if self.selectedEntry == entry {
-                    self.imageView.image = preview
+        let task = session.dataTask(with: request) { [weak self] data, response, error in
+            if let error = error as? URLError, error.code == .cancelled {
+                return
+            }
+            if let error {
+                DispatchQueue.main.async { completion(.failure(error)) }
+                return
+            }
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                DispatchQueue.main.async { completion(.failure(PetdexNetworkError.httpStatus(http.statusCode))) }
+                return
+            }
+            guard let self, let data else {
+                DispatchQueue.main.async { completion(.failure(PetdexPreviewError.invalidImage)) }
+                return
+            }
+
+            self.decodeQueue.async {
+                guard let preview = Self.firstFrameImage(
+                    from: data,
+                    frameWidth: entry.frameWidth,
+                    frameHeight: entry.frameHeight
+                ) else {
+                    DispatchQueue.main.async { completion(.failure(PetdexPreviewError.invalidImage)) }
+                    return
                 }
+                self.cache.store(preview, for: entry)
+                DispatchQueue.main.async { completion(.success(preview)) }
             }
         }
-        previewTask?.resume()
+        task.resume()
+        return task
     }
 
-    private static func firstFrameImage(from image: NSImage, frameWidth: Int, frameHeight: Int) -> NSImage {
+    static func firstFrameImage(from data: Data, frameWidth: Int, frameHeight: Int) -> NSImage? {
+        guard let image = NSImage(data: data) else { return nil }
+        return firstFrameImage(from: image, frameWidth: frameWidth, frameHeight: frameHeight)
+    }
+
+    static func firstFrameImage(from image: NSImage, frameWidth: Int, frameHeight: Int) -> NSImage {
         let outputSize = NSSize(width: frameWidth, height: frameHeight)
         let output = NSImage(size: outputSize)
         output.lockFocus()
@@ -596,27 +494,328 @@ final class PetdexBrowserWindowController: NSWindowController, NSTableViewDataSo
         output.unlockFocus()
         return output
     }
+}
 
-    @objc private func refreshCatalog() {
-        loadCatalog()
+private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var delegate: WKScriptMessageHandler?
+
+    init(delegate: WKScriptMessageHandler) {
+        self.delegate = delegate
     }
 
-    @objc private func openSelectedPetdexPage() {
-        guard let url = selectedEntry?.petdexURL else { return }
-        NSWorkspace.shared.open(url)
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        delegate?.userContentController(userContentController, didReceive: message)
+    }
+}
+
+enum PetdexBrowserBridgeAction: String, CaseIterable {
+    case importPet
+    case listInstalledPets
+    case selectInstalledPet
+    case uninstallInstalledPet
+    case getDaemonSnapshot
+    case approvalDecision
+}
+
+typealias DaemonSnapshotProvider = (@escaping (DaemonSnapshot?) -> Void) -> Void
+
+final class PetdexBrowserWindowController: NSWindowController, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
+    private enum Constants {
+        static let bridgeName = "codexPets"
+        static let browserResourceDirectory = "PetdexBrowser"
+        static let initialSize = NSRect(x: 0, y: 0, width: 1180, height: 760)
+        static let minimumSize = NSSize(width: 920, height: 620)
+        static let backgroundColor = NSColor(
+            srgbRed: 245.0 / 255.0,
+            green: 247.0 / 255.0,
+            blue: 248.0 / 255.0,
+            alpha: 1
+        )
     }
 
-    @objc private func importSelectedPet() {
-        guard let entry = selectedEntry else { return }
-        setStatus("Importing \(entry.displayName)…")
-        importButton.isEnabled = false
+    private let store: PetStore
+    private let client: PetdexCatalogClient
+    private let onImport: (PetPackage) -> Void
+    private let installedPetsProvider: () -> [PetPackage]
+    private let onSelectInstalled: (PetPackage) -> Void
+    private let onUninstallInstalled: (PetPackage) -> Void
+    private let daemonSnapshotProvider: DaemonSnapshotProvider
+    private let onApprovalDecision: (_ approvalID: String, _ decision: String) -> Void
+    private let webView: WKWebView
+    private let loadingView = NSView(frame: .zero)
+    private let statusLabel = NSTextField(labelWithString: "Loading Petdex...")
+
+    private var didStartLoading = false
+    private var didFinishInitialLoad = false
+    private var importInFlight = false
+    private var scriptMessageHandler: WeakScriptMessageHandler?
+
+    init(
+        store: PetStore,
+        client: PetdexCatalogClient = PetdexCatalogClient(),
+        installedPetsProvider: (() -> [PetPackage])? = nil,
+        onImport: @escaping (PetPackage) -> Void,
+        onSelectInstalled: ((PetPackage) -> Void)? = nil,
+        onUninstallInstalled: ((PetPackage) -> Void)? = nil,
+        daemonSnapshotProvider: DaemonSnapshotProvider? = nil,
+        onApprovalDecision: ((_ approvalID: String, _ decision: String) -> Void)? = nil
+    ) {
+        self.store = store
+        self.client = client
+        self.onImport = onImport
+        self.installedPetsProvider = installedPetsProvider ?? { store.scan() }
+        self.onSelectInstalled = onSelectInstalled ?? onImport
+        self.onUninstallInstalled = onUninstallInstalled ?? { _ in }
+        self.daemonSnapshotProvider = daemonSnapshotProvider ?? { completion in completion(nil) }
+        self.onApprovalDecision = onApprovalDecision ?? { _, _ in }
+        self.webView = WKWebView(frame: .zero, configuration: Self.makeWebViewConfiguration())
+        let window = NSWindow(
+            contentRect: Constants.initialSize,
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Browse Petdex"
+        window.minSize = Constants.minimumSize
+        window.backgroundColor = Constants.backgroundColor
+        super.init(window: window)
+
+        let handler = WeakScriptMessageHandler(delegate: self)
+        scriptMessageHandler = handler
+        webView.configuration.userContentController.add(handler, name: Constants.bridgeName)
+        setupUI()
+        prepareForDisplay()
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    deinit {
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: Constants.bridgeName)
+    }
+
+    func prepareForDisplay() {
+        loadBrowserIfNeeded()
+    }
+
+    override func showWindow(_ sender: Any?) {
+        prepareForDisplay()
+        super.showWindow(sender)
+        if didFinishInitialLoad {
+            revealWebView()
+        }
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == Constants.bridgeName,
+              let body = message.body as? [String: Any],
+              let actionName = body["action"] as? String,
+              let action = PetdexBrowserBridgeAction(rawValue: actionName)
+        else {
+            return
+        }
+
+        switch action {
+        case .importPet:
+            importPet(from: body["pet"])
+        case .listInstalledPets:
+            sendInstalledPets()
+        case .selectInstalledPet:
+            selectInstalledPet(from: body["petId"])
+        case .uninstallInstalledPet:
+            uninstallInstalledPet(from: body["petId"])
+        case .getDaemonSnapshot:
+            sendDaemonSnapshot()
+        case .approvalDecision:
+            handleApprovalDecision(body)
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        didFinishInitialLoad = true
+        revealWebView()
+        notifyNativeReady()
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        showLoadingStatus(error.localizedDescription)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        showLoadingStatus(error.localizedDescription)
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        didStartLoading = false
+        didFinishInitialLoad = false
+        webView.alphaValue = 0
+        loadingView.isHidden = false
+        showLoadingStatus("Reloading Petdex...")
+        loadBrowserIfNeeded()
+    }
+
+    func publishDaemonSnapshot(_ snapshot: DaemonSnapshot) {
+        sendDaemonSnapshot(snapshot)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        if navigationAction.navigationType == .linkActivated,
+           let url = navigationAction.request.url,
+           Self.shouldOpenExternally(url)
+        {
+            NSWorkspace.shared.open(url)
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        if navigationAction.targetFrame == nil,
+           let url = navigationAction.request.url,
+           Self.shouldOpenExternally(url)
+        {
+            NSWorkspace.shared.open(url)
+        }
+        return nil
+    }
+
+    private static func makeWebViewConfiguration() -> WKWebViewConfiguration {
+        let configuration = WKWebViewConfiguration()
+        let userContentController = WKUserContentController()
+        let bootstrap = """
+        (() => {
+          const postMessage = (payload) => {
+            window.webkit?.messageHandlers?.\(Constants.bridgeName)?.postMessage(payload);
+          };
+          Object.defineProperty(window, "CodexPetsNative", {
+            configurable: true,
+            value: { isNativeShell: true, postMessage }
+          });
+          document.documentElement.classList.add("native-shell");
+          const notifyReady = () => {
+            window.dispatchEvent(new CustomEvent("codex-pets-native-ready"));
+          };
+          if (document.readyState === "loading") {
+            document.addEventListener("DOMContentLoaded", notifyReady, { once: true });
+          } else {
+            notifyReady();
+          }
+        })();
+        """
+        userContentController.addUserScript(WKUserScript(source: bootstrap, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        configuration.userContentController = userContentController
+        configuration.websiteDataStore = .default()
+        configuration.suppressesIncrementalRendering = true
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        return configuration
+    }
+
+    private func setupUI() {
+        guard let contentView = window?.contentView else { return }
+
+        contentView.wantsLayer = true
+        contentView.layer?.backgroundColor = Constants.backgroundColor.cgColor
+
+        webView.navigationDelegate = self
+        webView.uiDelegate = self
+        webView.alphaValue = 0
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        webView.wantsLayer = true
+        webView.layer?.backgroundColor = Constants.backgroundColor.cgColor
+        contentView.addSubview(webView)
+
+        loadingView.wantsLayer = true
+        loadingView.layer?.backgroundColor = Constants.backgroundColor.cgColor
+        loadingView.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(loadingView)
+
+        statusLabel.alignment = .center
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        loadingView.addSubview(statusLabel)
+
+        NSLayoutConstraint.activate([
+            webView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            webView.topAnchor.constraint(equalTo: contentView.topAnchor),
+            webView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            loadingView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            loadingView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            loadingView.topAnchor.constraint(equalTo: contentView.topAnchor),
+            loadingView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            statusLabel.centerXAnchor.constraint(equalTo: loadingView.centerXAnchor),
+            statusLabel.centerYAnchor.constraint(equalTo: loadingView.centerYAnchor),
+            statusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: loadingView.leadingAnchor, constant: 24),
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: loadingView.trailingAnchor, constant: -24),
+        ])
+    }
+
+    private func showLoadingStatus(_ message: String) {
+        statusLabel.stringValue = message
+    }
+
+    private func loadBrowserIfNeeded() {
+        guard !didStartLoading else { return }
+        didStartLoading = true
+        showLoadingStatus("Loading Petdex...")
+
+        if let indexURL = Self.browserIndexURL() {
+            webView.loadFileURL(indexURL, allowingReadAccessTo: indexURL.deletingLastPathComponent())
+        } else {
+            let html = """
+            <!doctype html>
+            <html><body style="margin:0;background:#f5f7f8;color:#182427;font:14px -apple-system, BlinkMacSystemFont, sans-serif;display:grid;min-height:100vh;place-items:center">
+            <p>Petdex browser assets were not found in the app bundle.</p>
+            </body></html>
+            """
+            webView.loadHTMLString(html, baseURL: nil)
+        }
+    }
+
+    private func revealWebView() {
+        loadingView.isHidden = true
+        webView.alphaValue = 1
+    }
+
+    private func notifyNativeReady() {
+        evaluateJavaScriptEvent(
+            name: "codex-pets-native-ready",
+            detail: [:]
+        )
+        sendInstalledPets()
+        sendDaemonSnapshot()
+    }
+
+    private func importPet(from payload: Any?) {
+        guard !importInFlight else {
+            evaluateImportResult(ok: false, message: "Another import is already running")
+            return
+        }
+        guard let entry = Self.entry(from: payload) else {
+            evaluateImportResult(ok: false, message: "Selected pet metadata is incomplete")
+            return
+        }
+
+        importInFlight = true
         client.downloadPackage(for: entry) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.importButton.isEnabled = self.selectedEntry != nil
+                self.importInFlight = false
                 switch result {
                 case let .failure(error):
-                    self.setStatus(error.localizedDescription)
+                    self.evaluateImportResult(ok: false, message: error.localizedDescription)
                 case let .success(package):
                     do {
                         let pet = try self.store.importDownloadedPetdexPet(
@@ -625,17 +824,189 @@ final class PetdexBrowserWindowController: NSWindowController, NSTableViewDataSo
                             spritesheet: package.spritesheet,
                             spritesheetExtension: package.spritesheetExtension
                         )
-                        self.setStatus("Imported \(pet.displayName)")
+                        self.evaluateImportResult(ok: true, message: "Imported \(pet.displayName)")
                         self.onImport(pet)
+                        self.sendInstalledPets()
                     } catch {
-                        self.setStatus(error.localizedDescription)
+                        self.evaluateImportResult(ok: false, message: error.localizedDescription)
                     }
                 }
             }
         }
     }
 
-    private func setStatus(_ message: String) {
-        statusLabel.stringValue = message
+    private func evaluateImportResult(ok: Bool, message: String) {
+        evaluateJavaScriptEvent(
+            name: "codex-pets-native-import-result",
+            detail: [
+                "ok": ok,
+                "message": message,
+            ]
+        )
+    }
+
+    private func sendInstalledPets() {
+        let pets = installedPetsProvider().map(Self.installedPetPayload)
+        evaluateJavaScriptEvent(
+            name: "codex-pets-native-installed-pets",
+            detail: ["pets": pets]
+        )
+    }
+
+    private func selectInstalledPet(from payload: Any?) {
+        guard let pet = installedPet(for: payload) else {
+            evaluateImportResult(ok: false, message: "Installed pet was not found")
+            return
+        }
+        onSelectInstalled(pet)
+        evaluateImportResult(ok: true, message: "Selected \(pet.displayName)")
+        sendInstalledPets()
+    }
+
+    private func uninstallInstalledPet(from payload: Any?) {
+        guard let pet = installedPet(for: payload) else {
+            evaluateImportResult(ok: false, message: "Installed pet was not found")
+            return
+        }
+        onUninstallInstalled(pet)
+        evaluateImportResult(ok: true, message: "Removed \(pet.displayName)")
+        sendInstalledPets()
+    }
+
+    private func installedPet(for payload: Any?) -> PetPackage? {
+        guard let petID = Self.string(payload) else { return nil }
+        return installedPetsProvider().first { $0.id == petID }
+    }
+
+    private func handleApprovalDecision(_ body: [String: Any]) {
+        guard
+            let approvalID = Self.string(body["approvalId"]),
+            let decision = Self.string(body["decision"]),
+            decision == "approved" || decision == "denied"
+        else {
+            evaluateImportResult(ok: false, message: "Approval response is incomplete")
+            return
+        }
+        onApprovalDecision(approvalID, decision)
+        evaluateImportResult(ok: true, message: decision == "approved" ? "Approved command" : "Denied command")
+        sendDaemonSnapshot()
+    }
+
+    private func sendDaemonSnapshot() {
+        daemonSnapshotProvider { [weak self] snapshot in
+            guard let self, let snapshot else { return }
+            self.sendDaemonSnapshot(snapshot)
+        }
+    }
+
+    private func sendDaemonSnapshot(_ snapshot: DaemonSnapshot) {
+        guard
+            let data = try? JSONEncoder().encode(snapshot),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return
+        }
+        evaluateJavaScriptEvent(
+            name: "codex-pets-native-daemon-snapshot",
+            detail: object
+        )
+    }
+
+    private func evaluateJavaScriptEvent(name: String, detail: [String: Any]) {
+        let payload = (try? JSONSerialization.data(withJSONObject: detail, options: []))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        let script = """
+        window.dispatchEvent(new CustomEvent("\(name)", { detail: \(payload) }));
+        """
+        webView.evaluateJavaScript(script, completionHandler: nil)
+    }
+
+    private static func browserIndexURL() -> URL? {
+        var candidates: [URL] = []
+        if let resourceURL = Bundle.main.resourceURL {
+            candidates.append(
+                resourceURL
+                    .appendingPathComponent(Constants.browserResourceDirectory, isDirectory: true)
+                    .appendingPathComponent("index.html")
+            )
+        }
+        candidates.append(
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("index.html")
+        )
+        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    static func installedPetPayload(_ pet: PetPackage) -> [String: Any] {
+        [
+            "source": "installed",
+            "nativePetId": pet.id,
+            "slug": pet.slug,
+            "displayName": pet.displayName,
+            "description": pet.detail,
+            "kind": pet.kind,
+            "submittedBy": pet.source.label,
+            "tags": [],
+            "spritesheetUrl": pet.spritesheet.absoluteString,
+            "frameWidth": pet.frameWidth,
+            "frameHeight": pet.frameHeight,
+            "canUninstall": pet.source == .app,
+        ]
+    }
+
+    private static func shouldOpenExternally(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else { return false }
+        return scheme == "http" || scheme == "https"
+    }
+
+    static func entry(from payload: Any?) -> PetdexCatalogEntry? {
+        guard let object = payload as? [String: Any] else { return nil }
+        let slug = slugify(string(object["slug"]) ?? "")
+        let displayName = string(object["displayName"]) ?? slug
+        guard !slug.isEmpty, let spritesheetURL = webURL(object["spritesheetUrl"]) else {
+            return nil
+        }
+
+        return PetdexCatalogEntry(
+            slug: slug,
+            displayName: displayName,
+            detail: string(object["description"]) ?? "Animated Codex pet from Petdex.",
+            kind: string(object["kind"]) ?? "pet",
+            submittedBy: string(object["submittedBy"]) ?? "",
+            tags: stringList(object["tags"]),
+            spritesheetURL: spritesheetURL,
+            petJSONURL: webURL(object["petJsonUrl"]),
+            zipURL: webURL(object["zipUrl"]),
+            frameWidth: positiveInt(object["frameWidth"]) ?? 192,
+            frameHeight: positiveInt(object["frameHeight"]) ?? 208
+        )
+    }
+
+    private static func webURL(_ value: Any?) -> URL? {
+        guard let text = string(value),
+              let url = URL(string: text),
+              shouldOpenExternally(url)
+        else {
+            return nil
+        }
+        return url
+    }
+
+    private static func string(_ value: Any?) -> String? {
+        guard let text = value as? String else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func stringList(_ value: Any?) -> [String] {
+        guard let list = value as? [Any] else { return [] }
+        return list.compactMap(string).filter { !$0.isEmpty }
+    }
+
+    private static func positiveInt(_ value: Any?) -> Int? {
+        if let value = value as? Int, value > 0 { return value }
+        if let value = value as? Double, value > 0 { return Int(value) }
+        if let text = value as? String, let parsed = Int(text), parsed > 0 { return parsed }
+        return nil
     }
 }

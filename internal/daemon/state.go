@@ -1,0 +1,493 @@
+package daemon
+
+import (
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"codex-pets/internal/protocol"
+)
+
+const maxSafeSummaryLength = 180
+
+type Store struct {
+	mu        sync.RWMutex
+	now       func() time.Time
+	snapshot  protocol.Snapshot
+	waiters   map[string]chan protocol.ApprovalDecision
+	completed map[string]protocol.ApprovalDecision
+}
+
+func NewStore() *Store {
+	return NewStoreWithClock(time.Now)
+}
+
+func NewStoreWithClock(now func() time.Time) *Store {
+	ts := now().UTC()
+	return &Store{
+		now: now,
+		snapshot: protocol.Snapshot{
+			Attention:        protocol.AttentionIdle,
+			Sessions:         []protocol.Session{},
+			PendingApprovals: []protocol.PendingApproval{},
+			InstalledPets:    []protocol.PetRef{},
+			Catalogs:         map[string]protocol.CatalogCache{},
+			UpdatedAt:        ts,
+		},
+		waiters:   map[string]chan protocol.ApprovalDecision{},
+		completed: map[string]protocol.ApprovalDecision{},
+	}
+}
+
+func (s *Store) Snapshot() protocol.Snapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneSnapshot(s.snapshot)
+}
+
+func (s *Store) UpsertSession(input protocol.SessionUpsert) protocol.Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ts := s.now().UTC()
+	id := strings.TrimSpace(input.SessionID)
+	if id == "" {
+		id = "default"
+	}
+	status := protocol.NormalizeStatus(input.Status)
+	found := false
+	for i := range s.snapshot.Sessions {
+		if s.snapshot.Sessions[i].ID == id {
+			s.snapshot.Sessions[i].CWD = clamp(input.CWD, 240)
+			s.snapshot.Sessions[i].Title = clamp(input.Title, 120)
+			s.snapshot.Sessions[i].Status = status
+			s.snapshot.Sessions[i].SafeSummary = safeSummary(input.SafeSummary)
+			s.snapshot.Sessions[i].UpdatedAt = ts
+			found = true
+			break
+		}
+	}
+	if !found {
+		s.snapshot.Sessions = append(s.snapshot.Sessions, protocol.Session{
+			ID:          id,
+			CWD:         clamp(input.CWD, 240),
+			Title:       clamp(input.Title, 120),
+			Status:      status,
+			SafeSummary: safeSummary(input.SafeSummary),
+			StartedAt:   ts,
+			UpdatedAt:   ts,
+		})
+	}
+	s.finishMutationLocked(ts)
+	return cloneSnapshot(s.snapshot)
+}
+
+func (s *Store) RemoveSession(input protocol.SessionRemove) protocol.Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	id := strings.TrimSpace(input.SessionID)
+	if id == "" {
+		return cloneSnapshot(s.snapshot)
+	}
+	next := s.snapshot.Sessions[:0]
+	for _, session := range s.snapshot.Sessions {
+		if session.ID != id {
+			next = append(next, session)
+		}
+	}
+	s.snapshot.Sessions = next
+	s.finishMutationLocked(s.now().UTC())
+	return cloneSnapshot(s.snapshot)
+}
+
+func (s *Store) ToolStart(input protocol.ToolUpdate) protocol.Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ts := s.now().UTC()
+	session := s.ensureSessionLocked(strings.TrimSpace(input.SessionID), ts)
+	toolID := strings.TrimSpace(input.ToolCallID)
+	if toolID == "" {
+		toolID = input.ToolName + "-" + ts.Format("150405.000000000")
+	}
+
+	for i := range session.Tools {
+		if session.Tools[i].ID == toolID {
+			session.Tools[i].Name = clamp(input.ToolName, 80)
+			session.Tools[i].State = protocol.ToolRunning
+			session.Tools[i].SafeSummary = safeSummary(input.SafeSummary)
+			session.Tools[i].StartedAt = ts
+			session.Tools[i].EndedAt = time.Time{}
+			session.UpdatedAt = ts
+			s.finishMutationLocked(ts)
+			return cloneSnapshot(s.snapshot)
+		}
+	}
+	session.Tools = append(session.Tools, protocol.ToolRun{
+		ID:          toolID,
+		SessionID:   session.ID,
+		Name:        clamp(input.ToolName, 80),
+		State:       protocol.ToolRunning,
+		SafeSummary: safeSummary(input.SafeSummary),
+		StartedAt:   ts,
+	})
+	session.Status = protocol.SessionRunning
+	session.UpdatedAt = ts
+	s.finishMutationLocked(ts)
+	return cloneSnapshot(s.snapshot)
+}
+
+func (s *Store) ToolUpdate(input protocol.ToolUpdate) protocol.Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ts := s.now().UTC()
+	session := s.ensureSessionLocked(strings.TrimSpace(input.SessionID), ts)
+	toolID := strings.TrimSpace(input.ToolCallID)
+	if toolID == "" {
+		toolID = input.ToolName + "-" + ts.Format("150405.000000000")
+	}
+	name := clamp(input.ToolName, 80)
+	summary := safeSummary(input.SafeSummary)
+	for i := range session.Tools {
+		if session.Tools[i].ID == toolID {
+			if name != "" {
+				session.Tools[i].Name = name
+			}
+			if session.Tools[i].State == "" || session.Tools[i].State == protocol.ToolRunning {
+				session.Tools[i].State = protocol.ToolRunning
+			}
+			if summary != "" {
+				session.Tools[i].SafeSummary = summary
+			}
+			session.UpdatedAt = ts
+			s.finishMutationLocked(ts)
+			return cloneSnapshot(s.snapshot)
+		}
+	}
+	session.Tools = append(session.Tools, protocol.ToolRun{
+		ID:          toolID,
+		SessionID:   session.ID,
+		Name:        name,
+		State:       protocol.ToolRunning,
+		SafeSummary: summary,
+		StartedAt:   ts,
+	})
+	session.Status = protocol.SessionRunning
+	session.UpdatedAt = ts
+	s.finishMutationLocked(ts)
+	return cloneSnapshot(s.snapshot)
+}
+
+func (s *Store) ToolEnd(input protocol.ToolUpdate) protocol.Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ts := s.now().UTC()
+	session := s.ensureSessionLocked(strings.TrimSpace(input.SessionID), ts)
+	state := protocol.NormalizeToolState(input.State)
+	if state == protocol.ToolRunning {
+		state = protocol.ToolDone
+	}
+	for i := range session.Tools {
+		if session.Tools[i].ID == input.ToolCallID {
+			session.Tools[i].State = state
+			session.Tools[i].SafeSummary = safeSummary(input.SafeSummary)
+			session.Tools[i].EndedAt = ts
+			break
+		}
+	}
+	if state == protocol.ToolFailed {
+		session.Status = protocol.SessionFailed
+	}
+	session.UpdatedAt = ts
+	s.finishMutationLocked(ts)
+	return cloneSnapshot(s.snapshot)
+}
+
+func (s *Store) AddApproval(input protocol.ApprovalRequest) (protocol.PendingApproval, <-chan protocol.ApprovalDecision, protocol.Snapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ts := s.now().UTC()
+	id := strings.TrimSpace(input.ApprovalID)
+	if id == "" {
+		id = input.SessionID + ":" + input.ToolCallID
+	}
+	if id == ":" {
+		id = "approval-" + ts.Format("150405.000000000")
+	}
+
+	pending := protocol.PendingApproval{
+		ID:             id,
+		SessionID:      clamp(input.SessionID, 120),
+		ToolCallID:     clamp(input.ToolCallID, 120),
+		ToolName:       clamp(input.ToolName, 80),
+		CommandSummary: safeSummary(input.CommandSummary),
+		Risk:           clamp(input.Risk, 80),
+		State:          protocol.ApprovalPending,
+		CreatedAt:      ts,
+		UpdatedAt:      ts,
+	}
+
+	replaced := false
+	for i := range s.snapshot.PendingApprovals {
+		if s.snapshot.PendingApprovals[i].ID == id {
+			s.snapshot.PendingApprovals[i] = pending
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		s.snapshot.PendingApprovals = append(s.snapshot.PendingApprovals, pending)
+	}
+	ch := make(chan protocol.ApprovalDecision, 1)
+	s.waiters[id] = ch
+	s.finishMutationLocked(ts)
+	return pending, ch, cloneSnapshot(s.snapshot)
+}
+
+func (s *Store) ResolveApproval(input protocol.ApprovalDecision) (protocol.ApprovalDecision, bool, protocol.Snapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	decision, ok := protocol.NormalizeDecision(input.Decision)
+	if !ok {
+		return protocol.ApprovalDecision{}, false, cloneSnapshot(s.snapshot)
+	}
+	id := strings.TrimSpace(input.ApprovalID)
+	if id == "" {
+		return protocol.ApprovalDecision{}, false, cloneSnapshot(s.snapshot)
+	}
+	resolved := protocol.ApprovalDecision{
+		ApprovalID: id,
+		Decision:   decision,
+		Reason:     safeSummary(input.Reason),
+	}
+
+	next := s.snapshot.PendingApprovals[:0]
+	found := false
+	for _, pending := range s.snapshot.PendingApprovals {
+		if pending.ID == id {
+			found = true
+			continue
+		}
+		next = append(next, pending)
+	}
+	if !found {
+		return protocol.ApprovalDecision{}, false, cloneSnapshot(s.snapshot)
+	}
+	s.snapshot.PendingApprovals = next
+	s.completed[id] = resolved
+	if ch := s.waiters[id]; ch != nil {
+		ch <- resolved
+		close(ch)
+		delete(s.waiters, id)
+	}
+	s.finishMutationLocked(s.now().UTC())
+	return resolved, true, cloneSnapshot(s.snapshot)
+}
+
+func (s *Store) SelectPet(input protocol.PetSelect) protocol.Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshot.SelectedPetID = clamp(input.PetID, 160)
+	s.finishMutationLocked(s.now().UTC())
+	return cloneSnapshot(s.snapshot)
+}
+
+func (s *Store) SetInstalledPets(input protocol.InstalledPetsSet) protocol.Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pets := make([]protocol.PetRef, 0, len(input.Pets))
+	for _, pet := range input.Pets {
+		if strings.TrimSpace(pet.ID) == "" {
+			continue
+		}
+		pets = append(pets, sanitizePet(pet))
+	}
+	sort.Slice(pets, func(i, j int) bool {
+		return strings.ToLower(pets[i].DisplayName) < strings.ToLower(pets[j].DisplayName)
+	})
+	s.snapshot.InstalledPets = pets
+	s.finishMutationLocked(s.now().UTC())
+	return cloneSnapshot(s.snapshot)
+}
+
+func (s *Store) SetCatalog(input protocol.CatalogCache) protocol.Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	provider := clamp(input.Provider, 80)
+	if provider == "" {
+		provider = "unknown"
+	}
+	pets := make([]protocol.PetRef, 0, len(input.Pets))
+	for _, pet := range input.Pets {
+		if strings.TrimSpace(pet.ID) != "" {
+			pets = append(pets, sanitizePet(pet))
+		}
+	}
+	input.Provider = provider
+	input.Pets = pets
+	input.Error = safeSummary(input.Error)
+	if input.UpdatedAt.IsZero() {
+		input.UpdatedAt = s.now().UTC()
+	}
+	if s.snapshot.Catalogs == nil {
+		s.snapshot.Catalogs = map[string]protocol.CatalogCache{}
+	}
+	s.snapshot.Catalogs[provider] = input
+	s.finishMutationLocked(s.now().UTC())
+	return cloneSnapshot(s.snapshot)
+}
+
+func (s *Store) ExpireApproval(id string) (bool, protocol.Snapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	next := s.snapshot.PendingApprovals[:0]
+	found := false
+	for _, pending := range s.snapshot.PendingApprovals {
+		if pending.ID == id {
+			found = true
+			continue
+		}
+		next = append(next, pending)
+	}
+	if !found {
+		return false, cloneSnapshot(s.snapshot)
+	}
+	s.snapshot.PendingApprovals = next
+	if ch := s.waiters[id]; ch != nil {
+		ch <- protocol.ApprovalDecision{ApprovalID: id, Decision: protocol.ApprovalExpired, Reason: "approval timed out"}
+		close(ch)
+		delete(s.waiters, id)
+	}
+	s.finishMutationLocked(s.now().UTC())
+	return true, cloneSnapshot(s.snapshot)
+}
+
+func (s *Store) ensureSessionLocked(id string, ts time.Time) *protocol.Session {
+	if id == "" {
+		id = "default"
+	}
+	for i := range s.snapshot.Sessions {
+		if s.snapshot.Sessions[i].ID == id {
+			return &s.snapshot.Sessions[i]
+		}
+	}
+	s.snapshot.Sessions = append(s.snapshot.Sessions, protocol.Session{
+		ID:        id,
+		Status:    protocol.SessionIdle,
+		StartedAt: ts,
+		UpdatedAt: ts,
+	})
+	return &s.snapshot.Sessions[len(s.snapshot.Sessions)-1]
+}
+
+func (s *Store) finishMutationLocked(ts time.Time) {
+	sort.Slice(s.snapshot.Sessions, func(i, j int) bool {
+		if s.snapshot.Sessions[i].UpdatedAt.Equal(s.snapshot.Sessions[j].UpdatedAt) {
+			return s.snapshot.Sessions[i].ID < s.snapshot.Sessions[j].ID
+		}
+		return s.snapshot.Sessions[i].UpdatedAt.After(s.snapshot.Sessions[j].UpdatedAt)
+	})
+	sort.Slice(s.snapshot.PendingApprovals, func(i, j int) bool {
+		return s.snapshot.PendingApprovals[i].CreatedAt.Before(s.snapshot.PendingApprovals[j].CreatedAt)
+	})
+	s.snapshot.Attention = deriveAttention(s.snapshot.Sessions, s.snapshot.PendingApprovals)
+	s.snapshot.UpdatedAt = ts
+}
+
+func deriveAttention(sessions []protocol.Session, approvals []protocol.PendingApproval) protocol.AttentionState {
+	for _, approval := range approvals {
+		if approval.State == protocol.ApprovalPending {
+			return protocol.AttentionApprovalRequired
+		}
+	}
+
+	best := protocol.AttentionIdle
+	bestRank := attentionRank(best)
+	for _, session := range sessions {
+		attention := attentionForSession(session.Status)
+		rank := attentionRank(attention)
+		if rank > bestRank {
+			best = attention
+			bestRank = rank
+		}
+	}
+	return best
+}
+
+func attentionForSession(status protocol.SessionStatus) protocol.AttentionState {
+	switch protocol.NormalizeStatus(status) {
+	case protocol.SessionFailed, protocol.SessionDisconnected:
+		return protocol.AttentionFailed
+	case protocol.SessionDone:
+		return protocol.AttentionDone
+	case protocol.SessionRunning:
+		return protocol.AttentionRunning
+	case protocol.SessionThinking:
+		return protocol.AttentionThinking
+	default:
+		return protocol.AttentionIdle
+	}
+}
+
+func attentionRank(attention protocol.AttentionState) int {
+	switch attention {
+	case protocol.AttentionApprovalRequired:
+		return 60
+	case protocol.AttentionFailed:
+		return 50
+	case protocol.AttentionDone:
+		return 40
+	case protocol.AttentionRunning:
+		return 30
+	case protocol.AttentionThinking:
+		return 20
+	default:
+		return 10
+	}
+}
+
+func cloneSnapshot(snapshot protocol.Snapshot) protocol.Snapshot {
+	out := snapshot
+	out.Sessions = append([]protocol.Session{}, snapshot.Sessions...)
+	for i := range out.Sessions {
+		out.Sessions[i].Tools = append([]protocol.ToolRun(nil), snapshot.Sessions[i].Tools...)
+	}
+	out.PendingApprovals = append([]protocol.PendingApproval{}, snapshot.PendingApprovals...)
+	out.InstalledPets = append([]protocol.PetRef{}, snapshot.InstalledPets...)
+	out.Catalogs = make(map[string]protocol.CatalogCache, len(snapshot.Catalogs))
+	for key, catalog := range snapshot.Catalogs {
+		catalog.Pets = append([]protocol.PetRef{}, catalog.Pets...)
+		out.Catalogs[key] = catalog
+	}
+	return out
+}
+
+func sanitizePet(pet protocol.PetRef) protocol.PetRef {
+	return protocol.PetRef{
+		ID:          clamp(pet.ID, 160),
+		DisplayName: clamp(pet.DisplayName, 160),
+		Source:      clamp(pet.Source, 80),
+		Path:        clamp(pet.Path, 500),
+		License:     clamp(pet.License, 120),
+		Attribution: clamp(pet.Attribution, 240),
+	}
+}
+
+func safeSummary(value string) string {
+	return clamp(strings.Join(strings.Fields(value), " "), maxSafeSummaryLength)
+}
+
+func clamp(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= max {
+		return value
+	}
+	return value[:max]
+}

@@ -8,47 +8,34 @@
       content="Browse Codex pets from Petdex and add local custom Codex pet packages."
     />
     <title>Codex Pets</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <div id="app-shell">
-      <header class="topbar">
-        <a class="brand" href="/" aria-label="Codex Pets home">
-          <span class="brand-mark" aria-hidden="true">CP</span>
-          <span>
-            <strong>Codex Pets</strong>
-            <small>Petdex viewer</small>
-          </span>
-        </a>
+      <header class="app-toolbar" aria-label="Application toolbar">
+        <div class="toolbar-leading">
+          <span class="app-glyph" aria-hidden="true">CP</span>
+          <div class="toolbar-title">
+            <strong>Petdex</strong>
+            <small id="gallery-status" class="status-line">Loading Petdex...</small>
+          </div>
+        </div>
 
-        <form id="manifest-form" class="manifest-form">
-          <label class="sr-only" for="manifest-url">Manifest URL</label>
-          <input
-            id="manifest-url"
-            name="manifestUrl"
-            type="url"
-            spellcheck="false"
-            value="https://assets.petdex.dev/manifests/petdex-v1.json"
-          />
-          <button type="submit" class="icon-button text-button" title="Load manifest">
-            Load
-          </button>
-        </form>
+        <div class="toolbar-spacer" aria-hidden="true"></div>
       </header>
 
-      <main class="workspace">
-        <aside class="control-rail" aria-label="Pet controls">
-          <section class="panel search-panel">
-            <div class="field-with-icon">
+      <main class="app-layout">
+        <aside class="sidebar" aria-label="Library controls">
+          <section class="sidebar-section search-section">
+            <label class="search-field" for="pet-search">
               <span aria-hidden="true">/</span>
-              <label class="sr-only" for="pet-search">Search pets</label>
               <input
                 id="pet-search"
                 type="search"
                 autocomplete="off"
-                placeholder="Search name, slug, author"
+                placeholder="Search pets"
               />
-            </div>
+            </label>
 
             <div class="segmented-control" role="tablist" aria-label="Pet source">
               <button class="segment is-active" type="button" data-source="all">
@@ -60,12 +47,26 @@
               <button class="segment" type="button" data-source="custom">
                 Custom
               </button>
+              <button class="segment native-only" type="button" data-source="installed">
+                Installed
+              </button>
             </div>
           </section>
 
-          <section class="panel import-panel">
-            <div class="panel-heading">
-              <h2>Add Custom</h2>
+          <section class="sidebar-section counters-section" aria-label="Library counts">
+            <div>
+              <span>Catalog</span>
+              <strong id="manifest-total">0</strong>
+            </div>
+            <div>
+              <span>Visible</span>
+              <strong id="visible-total">0</strong>
+            </div>
+          </section>
+
+          <section class="sidebar-section import-section">
+            <div class="section-heading">
+              <h2>Custom package</h2>
               <span id="custom-count">0</span>
             </div>
 
@@ -100,70 +101,93 @@
                 placeholder="spritesheet URL"
                 spellcheck="false"
               />
-              <button type="submit" class="text-button">Add URL</button>
+              <button type="submit" class="plain-button">Add URL</button>
             </form>
 
             <p id="import-status" class="status-line" role="status"></p>
           </section>
 
-          <section class="panel stat-panel" aria-label="Gallery counts">
-            <div>
-              <strong id="manifest-total">0</strong>
-              <span>Petdex</span>
+          <section id="daemon-panel" class="sidebar-section daemon-section native-only" aria-label="Pi status">
+            <div class="section-heading">
+              <h2>Pi</h2>
+              <span id="approval-count">0</span>
             </div>
-            <div>
-              <strong id="visible-total">0</strong>
-              <span>Showing</span>
-            </div>
+            <p id="daemon-status" class="status-line">Waiting for Pi status...</p>
+            <div id="approval-list" class="approval-list"></div>
+            <div id="session-list" class="session-list"></div>
           </section>
+
+          <details class="sidebar-section source-section">
+            <summary>Catalog source</summary>
+            <form id="manifest-form" class="manifest-form">
+              <label class="sr-only" for="manifest-url">Manifest URL</label>
+              <input
+                id="manifest-url"
+                name="manifestUrl"
+                type="url"
+                spellcheck="false"
+                value="https://assets.petdex.dev/manifests/petdex-v1.json"
+              />
+              <button type="submit" class="plain-button">Load</button>
+            </form>
+            <div class="source-actions">
+              <button id="refresh-manifest" class="plain-button" type="button">Refresh</button>
+              <button id="shuffle-pet" class="plain-button" type="button">Shuffle</button>
+            </div>
+          </details>
         </aside>
 
-        <section class="stage" aria-label="Selected pet">
-          <div class="stage-copy">
-            <div class="eyebrow-row">
-              <span id="selected-source">Petdex</span>
-              <span id="selected-kind">creature</span>
-            </div>
-            <h1 id="selected-name">Boba</h1>
-            <p id="selected-description">
-              A tiny otter sipping bubble tea while keeping you company in Codex.
-            </p>
-            <div id="selected-tags" class="tag-row"></div>
-            <div class="command-row">
-              <code id="install-command">npx petdex install boba</code>
-              <button id="copy-command" class="icon-button" type="button" title="Copy">
-                Copy
-              </button>
-              <a id="open-petdex" class="text-link" href="https://petdex.dev" target="_blank" rel="noreferrer">
-                Petdex
-              </a>
-            </div>
-          </div>
-
-          <div class="stage-pet">
-            <div id="selected-sprite" class="selected-sprite" aria-live="polite"></div>
-            <div id="state-tabs" class="state-tabs" aria-label="Animation state"></div>
-          </div>
-        </section>
-
-        <section class="gallery-wrap" aria-label="Pet gallery">
-          <div class="gallery-toolbar">
+        <section class="library-pane" aria-label="Pet library">
+          <div class="pane-header">
             <div>
-              <h2>Gallery</h2>
-              <p id="gallery-status" class="status-line">Loading Petdex...</p>
-            </div>
-            <div class="toolbar-actions">
-              <button id="shuffle-pet" class="icon-button text-button" type="button">
-                Shuffle
-              </button>
-              <button id="refresh-manifest" class="icon-button text-button" type="button">
-                Refresh
-              </button>
+              <h2>Library</h2>
+              <p>Choose a pet to preview, import, or select.</p>
             </div>
           </div>
 
           <div id="pet-grid" class="pet-grid"></div>
           <button id="load-more" class="load-more" type="button">Load More</button>
+        </section>
+
+        <section class="detail-pane" aria-label="Selected pet">
+          <div class="preview-pane">
+            <div class="preview-toolbar">
+              <div class="eyebrow-row">
+                <span id="selected-source">Petdex</span>
+                <span id="selected-kind">creature</span>
+              </div>
+              <a id="open-petdex" class="text-link" href="https://petdex.dev" target="_blank" rel="noreferrer">
+                Open
+              </a>
+            </div>
+
+            <div class="sprite-stage">
+              <div id="selected-sprite" class="selected-sprite" aria-live="polite"></div>
+            </div>
+
+            <div id="state-tabs" class="state-tabs" aria-label="Animation state"></div>
+          </div>
+
+          <div class="inspector-pane">
+            <div class="pet-identity">
+              <h1 id="selected-name">Boba</h1>
+              <p id="selected-description">
+                A tiny otter sipping bubble tea while keeping you company in Codex.
+              </p>
+            </div>
+
+            <div id="selected-tags" class="tag-row"></div>
+
+            <div class="command-row">
+              <code id="install-command">npx petdex install boba</code>
+              <button id="copy-command" class="plain-button" type="button" title="Copy">
+                Copy
+              </button>
+              <button id="native-import" class="primary-button native-only" type="button" hidden>
+                Import & Use
+              </button>
+            </div>
+          </div>
         </section>
       </main>
     </div>
@@ -180,6 +204,6 @@
       </article>
     </template>
 
-    <script type="module" src="/app.js"></script>
+    <script type="module" src="app.js"></script>
   </body>
 </html>
