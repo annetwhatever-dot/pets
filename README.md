@@ -24,9 +24,18 @@ The app appears as a `CP` status-bar item. Use that menu to import a pet folder,
 The menu also includes Calm Pet Engine controls:
 
 - **Animation:** Focus, Default, or Playful attention budgets.
-- **Bubbles:** Off, Important Only, or All.
+- **Bubbles / Pet Murmurs:** Silent, Quiet, Default, or Chatty. Default is intentionally calm: short curated replies, daily budgets, global cooldowns, semantic anti-repeat, and no raw workflow labels for known Codex events.
+- **Mute Murmurs Today:** clears the current murmur and keeps the pet quiet until tomorrow.
 - **Reduced Motion:** follow macOS Reduce Motion or force static poses.
 - **Full-screen:** hidden in full-screen apps by default; opt in from Settings.
+
+Pet Murmurs are stored locally in:
+
+```text
+~/Library/Application Support/CodexPets/DialogueHistory.json
+```
+
+Clicking a visible murmur bubble dismisses it and mutes additional murmurs for a few hours. Direct `/bubble` API messages still display as explicit caller-provided text.
 
 The transparent overlay is click-through outside the real pet sprite, so padding around the window does not block apps underneath. Mouse proximity, hover, click, double-click, drag, and spam-click reactions work without Accessibility or Input Monitoring permissions.
 
@@ -81,7 +90,7 @@ curl -X POST http://127.0.0.1:7777/event \
 
 Supported states are `idle`, `running`, `running-left`, `running-right`, `waving`, `jumping`, `failed`, `waiting`, and `review`.
 
-Supported event types include `task.succeeded`, `task.needs_user`, and `task.failed`. `/state` remains the backward-compatible shortcut; `/event` is preferred for one-shot success, review, and failure moments.
+Supported event types include `task.succeeded`, `task.needs_user`, `review`, and `task.failed`. `/state` remains the backward-compatible shortcut; `/event` is preferred for one-shot success, waiting/review, and failure moments. Known workflow events show curated Pet Murmurs instead of raw labels; use `/bubble` when you explicitly want to display caller-provided text.
 
 Run the native tests:
 

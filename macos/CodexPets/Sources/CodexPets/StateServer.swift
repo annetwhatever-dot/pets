@@ -122,7 +122,7 @@ final class StateServer {
         }
 
         if request.method == "GET", request.path == "/event" {
-            return .json(status: 200, ["ok": true, "types": ["task.succeeded", "task.needs_user", "task.failed"]])
+            return .json(status: 200, ["ok": true, "types": ["task.succeeded", "task.needs_user", "review", "task.failed"]])
         }
 
         guard request.method == "POST", request.path == "/state" || request.path == "/bubble" || request.path == "/event" else {

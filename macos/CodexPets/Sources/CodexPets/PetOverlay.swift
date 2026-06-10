@@ -34,7 +34,10 @@ final class PetOverlayController: NSObject {
             backing: .buffered,
             defer: false
         )
-        self.brain = PetBrain(reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        self.brain = PetBrain(
+            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+            dialogueHistoryStore: DialogueHistoryStore.default()
+        )
         super.init()
 
         panel.contentView = rootView
@@ -60,6 +63,9 @@ final class PetOverlayController: NSObject {
         }
         rootView.dragEndedHandler = { [weak self] in
             self?.scheduleIdleReset(after: 0.8)
+        }
+        rootView.bubbleActionHandler = { [weak self] in
+            self?.dismissBubbleAndMute()
         }
 
         NotificationCenter.default.addObserver(
@@ -155,6 +161,11 @@ final class PetOverlayController: NSObject {
         updateMouseTransparencyAndProximity()
     }
 
+    func muteMurmursForToday() {
+        brain.muteMurmursForToday()
+        setBubble("")
+    }
+
     func applySettings(
         attentionMode: PetAttentionMode,
         bubbleMode: PetBubbleMode,
@@ -202,6 +213,12 @@ final class PetOverlayController: NSObject {
     private func handleDirectSignal(_ signal: PetSignal) {
         guard let decision = brain.handle(signal) else { return }
         apply(decision)
+    }
+
+    private func dismissBubbleAndMute() {
+        guard !rootView.bubbleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        brain.muteMurmurs(for: 3 * 60 * 60)
+        setBubble("")
     }
 
     private func apply(_ decision: PetDecision, resetOverride: TimeInterval? = nil) {
@@ -338,8 +355,7 @@ final class PetOverlayController: NSObject {
         let screenPoint = NSEvent.mouseLocation
         let windowPoint = panel.convertPoint(fromScreen: screenPoint)
         let localPoint = rootView.convert(windowPoint, from: nil)
-        let interactiveRect = rootView.interactiveRect.insetBy(dx: -6, dy: -6)
-        let cursorOverInteractive = !interactiveRect.isEmpty && interactiveRect.contains(localPoint)
+        let cursorOverInteractive = rootView.containsInteractivePoint(localPoint)
 
         if panel.ignoresMouseEvents == cursorOverInteractive {
             panel.ignoresMouseEvents = !cursorOverInteractive
@@ -457,12 +473,20 @@ final class PetOverlayView: NSView {
         )
     }
 
-    var interactiveRect: NSRect {
-        var rect = spriteRect
-        if bubbleActionHandler != nil, !bubbleRect.isEmpty {
-            rect = rect.union(bubbleRect)
+    func containsInteractivePoint(_ point: NSPoint) -> Bool {
+        let paddedSprite = spriteRect.insetBy(dx: -6, dy: -6)
+        if !paddedSprite.isEmpty, paddedSprite.contains(point) {
+            return true
         }
-        return rect
+
+        if bubbleActionHandler != nil {
+            let paddedBubble = bubbleRect.insetBy(dx: -6, dy: -6)
+            if !paddedBubble.isEmpty, paddedBubble.contains(point) {
+                return true
+            }
+        }
+
+        return false
     }
 
     func distanceFromSprite(to point: NSPoint) -> CGFloat {
@@ -506,7 +530,7 @@ final class PetOverlayView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        interactiveRect.insetBy(dx: -6, dy: -6).contains(point) ? self : nil
+        containsInteractivePoint(point) ? self : nil
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
