@@ -1,6 +1,14 @@
 import Cocoa
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private enum DefaultsKey {
+        static let attentionMode = "CodexPets.attentionMode"
+        static let bubbleMode = "CodexPets.bubbleMode"
+        static let followsSystemReduceMotion = "CodexPets.followsSystemReduceMotion"
+        static let alwaysReduceMotion = "CodexPets.alwaysReduceMotion"
+        static let showsInFullScreen = "CodexPets.showsInFullScreen"
+    }
+
     private let store = PetStore()
     private let overlay = PetOverlayController()
     private var server: StateServer?
@@ -14,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pets = store.scan()
 
         setupStatusItem()
+        loadOverlaySettings()
         server = StateServer(
             runtimeRoot: store.runtimeRoot,
             onState: { [weak self] state, duration in
@@ -21,6 +30,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             onBubble: { [weak self] text in
                 self?.overlay.setBubble(text)
+            },
+            onEvent: { [weak self] type, label, importance in
+                self?.overlay.setEvent(type: type, label: label, importance: importance)
             }
         )
         server?.start()
@@ -66,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(petsSubmenu())
         menu.addItem(statesSubmenu())
         menu.addItem(sizeSubmenu())
+        menu.addItem(settingsSubmenu())
 
         menu.addItem(.separator())
 
@@ -151,6 +164,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return item
     }
 
+    private func settingsSubmenu() -> NSMenuItem {
+        let item = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+
+        let animation = NSMenuItem(title: "Animation", action: nil, keyEquivalent: "")
+        let animationSubmenu = NSMenu()
+        for mode in PetAttentionMode.allCases {
+            let modeItem = NSMenuItem(title: mode.label, action: #selector(selectAttentionMode(_:)), keyEquivalent: "")
+            modeItem.target = self
+            modeItem.representedObject = mode.rawValue
+            modeItem.state = overlay.attentionMode == mode ? .on : .off
+            animationSubmenu.addItem(modeItem)
+        }
+        animation.submenu = animationSubmenu
+        submenu.addItem(animation)
+
+        let bubbles = NSMenuItem(title: "Bubbles", action: nil, keyEquivalent: "")
+        let bubblesSubmenu = NSMenu()
+        for mode in PetBubbleMode.allCases {
+            let bubbleItem = NSMenuItem(title: mode.label, action: #selector(selectBubbleMode(_:)), keyEquivalent: "")
+            bubbleItem.target = self
+            bubbleItem.representedObject = mode.rawValue
+            bubbleItem.state = overlay.bubbleMode == mode ? .on : .off
+            bubblesSubmenu.addItem(bubbleItem)
+        }
+        bubbles.submenu = bubblesSubmenu
+        submenu.addItem(bubbles)
+
+        submenu.addItem(.separator())
+
+        let followReduce = NSMenuItem(
+            title: "Reduced Motion: Follow System",
+            action: #selector(toggleFollowSystemReduceMotion),
+            keyEquivalent: ""
+        )
+        followReduce.target = self
+        followReduce.state = overlay.followsSystemReduceMotion ? .on : .off
+        submenu.addItem(followReduce)
+
+        let alwaysReduce = NSMenuItem(
+            title: "Reduced Motion: Always Reduce",
+            action: #selector(toggleAlwaysReduceMotion),
+            keyEquivalent: ""
+        )
+        alwaysReduce.target = self
+        alwaysReduce.state = overlay.alwaysReduceMotion ? .on : .off
+        submenu.addItem(alwaysReduce)
+
+        submenu.addItem(.separator())
+
+        let fullScreen = NSMenuItem(
+            title: "Show in Full-Screen Apps",
+            action: #selector(toggleShowInFullScreen),
+            keyEquivalent: ""
+        )
+        fullScreen.target = self
+        fullScreen.state = overlay.showsInFullScreen ? .on : .off
+        submenu.addItem(fullScreen)
+
+        let mouseMode = NSMenuItem(title: "Mouse Reactions: Near Pet Only", action: nil, keyEquivalent: "")
+        mouseMode.isEnabled = false
+        submenu.addItem(mouseMode)
+
+        let permissionMode = NSMenuItem(title: "Anywhere Reactions Require Input Monitoring", action: nil, keyEquivalent: "")
+        permissionMode.isEnabled = false
+        submenu.addItem(permissionMode)
+
+        item.submenu = submenu
+        return item
+    }
+
     private func selectPet(_ pet: PetPackage) {
         selectedPetID = pet.id
         overlay.setPet(pet)
@@ -225,6 +309,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
+    @objc private func selectAttentionMode(_ sender: NSMenuItem) {
+        guard
+            let raw = sender.representedObject as? String,
+            let mode = PetAttentionMode(rawValue: raw)
+        else { return }
+        overlay.setAttentionMode(mode)
+        UserDefaults.standard.set(mode.rawValue, forKey: DefaultsKey.attentionMode)
+        rebuildMenu()
+    }
+
+    @objc private func selectBubbleMode(_ sender: NSMenuItem) {
+        guard
+            let raw = sender.representedObject as? String,
+            let mode = PetBubbleMode(rawValue: raw)
+        else { return }
+        overlay.setBubbleMode(mode)
+        UserDefaults.standard.set(mode.rawValue, forKey: DefaultsKey.bubbleMode)
+        rebuildMenu()
+    }
+
+    @objc private func toggleFollowSystemReduceMotion() {
+        let next = !overlay.followsSystemReduceMotion
+        overlay.setFollowsSystemReduceMotion(next)
+        UserDefaults.standard.set(next, forKey: DefaultsKey.followsSystemReduceMotion)
+        rebuildMenu()
+    }
+
+    @objc private func toggleAlwaysReduceMotion() {
+        let next = !overlay.alwaysReduceMotion
+        overlay.setAlwaysReduceMotion(next)
+        UserDefaults.standard.set(next, forKey: DefaultsKey.alwaysReduceMotion)
+        rebuildMenu()
+    }
+
+    @objc private func toggleShowInFullScreen() {
+        let next = !overlay.showsInFullScreen
+        overlay.setShowsInFullScreen(next)
+        UserDefaults.standard.set(next, forKey: DefaultsKey.showsInFullScreen)
+        rebuildMenu()
+    }
+
     @objc private func showTestBubble() {
         overlay.setBubble("Codex Pets is awake")
     }
@@ -249,5 +374,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = error.localizedDescription
         alert.alertStyle = .warning
         alert.runModal()
+    }
+
+    private func loadOverlaySettings() {
+        let defaults = UserDefaults.standard
+        let attentionMode = PetAttentionMode(rawValue: defaults.string(forKey: DefaultsKey.attentionMode) ?? "") ?? .default
+        let bubbleMode = PetBubbleMode(rawValue: defaults.string(forKey: DefaultsKey.bubbleMode) ?? "") ?? .importantOnly
+        let followsSystemReduceMotion = defaults.object(forKey: DefaultsKey.followsSystemReduceMotion) as? Bool ?? true
+        let alwaysReduceMotion = defaults.bool(forKey: DefaultsKey.alwaysReduceMotion)
+        let showsInFullScreen = defaults.bool(forKey: DefaultsKey.showsInFullScreen)
+
+        overlay.applySettings(
+            attentionMode: attentionMode,
+            bubbleMode: bubbleMode,
+            followsSystemReduceMotion: followsSystemReduceMotion,
+            alwaysReduceMotion: alwaysReduceMotion,
+            showsInFullScreen: showsInFullScreen
+        )
     }
 }

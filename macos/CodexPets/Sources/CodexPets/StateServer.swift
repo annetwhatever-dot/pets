@@ -4,20 +4,28 @@ import Network
 final class StateServer {
     typealias StateHandler = (_ state: String, _ duration: TimeInterval?) -> Void
     typealias BubbleHandler = (_ text: String) -> Void
+    typealias EventHandler = (_ type: String, _ label: String?, _ importance: PetEventImportance) -> Void
 
     private let runtimeRoot: URL
     private let onState: StateHandler
     private let onBubble: BubbleHandler
+    private let onEvent: EventHandler
     private var listener: NWListener?
     private var runningToggle = false
 
     private(set) var port: UInt16 = 7777
     let token: String
 
-    init(runtimeRoot: URL, onState: @escaping StateHandler, onBubble: @escaping BubbleHandler) {
+    init(
+        runtimeRoot: URL,
+        onState: @escaping StateHandler,
+        onBubble: @escaping BubbleHandler,
+        onEvent: @escaping EventHandler
+    ) {
         self.runtimeRoot = runtimeRoot
         self.onState = onState
         self.onBubble = onBubble
+        self.onEvent = onEvent
         self.token = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     }
 
@@ -74,6 +82,7 @@ final class StateServer {
             "tokenPath": tokenURL.path,
             "stateUrl": "http://127.0.0.1:\(port)/state",
             "bubbleUrl": "http://127.0.0.1:\(port)/bubble",
+            "eventUrl": "http://127.0.0.1:\(port)/event",
         ]
         if let data = try? JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: infoURL)
@@ -112,7 +121,11 @@ final class StateServer {
             return .json(status: 200, ["ok": true])
         }
 
-        guard request.method == "POST", request.path == "/state" || request.path == "/bubble" else {
+        if request.method == "GET", request.path == "/event" {
+            return .json(status: 200, ["ok": true, "types": ["task.succeeded", "task.needs_user", "task.failed"]])
+        }
+
+        guard request.method == "POST", request.path == "/state" || request.path == "/bubble" || request.path == "/event" else {
             return .json(status: 404, ["ok": false, "error": "not_found"])
         }
 
@@ -134,6 +147,24 @@ final class StateServer {
                 onBubble(String(text))
             }
             return .json(status: 200, ["ok": true, "text": String(text)])
+        }
+
+        if request.path == "/event" {
+            guard let type = (body["type"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !type.isEmpty else {
+                return .json(status: 400, ["ok": false, "error": "missing_event_type"])
+            }
+            let rawLabel = (body["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let label = rawLabel?.isEmpty == false ? rawLabel : nil
+            let importance = PetEventImportance(raw: body["importance"] as? String)
+            DispatchQueue.main.async { [onEvent] in
+                onEvent(type, label, importance)
+            }
+            return .json(status: 200, [
+                "ok": true,
+                "type": type,
+                "label": label ?? NSNull(),
+                "importance": importance.rawValue,
+            ])
         }
 
         guard var state = body["state"] as? String, validStates.contains(state) else {
