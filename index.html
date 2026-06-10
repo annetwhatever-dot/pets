@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
     <meta name="description" content="Choose a Codex pet from Petdex." />
     <title>Petdex</title>
     <link rel="stylesheet" href="styles.css" />
@@ -36,10 +37,14 @@
             <p id="source-label" class="source-label">Petdex</p>
             <h1 id="pet-name">Petdex</h1>
             <p id="pet-description">Choose a pet to preview it.</p>
+            <p id="pi-extension-status" class="pi-extension-status">Pi extension status unavailable</p>
           </div>
           <div class="action-row" aria-label="Actions">
             <button id="install-pi-action" class="secondary-action" type="button" disabled>
               Install to Pi
+            </button>
+            <button id="uninstall-pi-action" class="secondary-action" type="button" hidden disabled>
+              Uninstall Pi
             </button>
             <button id="primary-action" type="button" disabled>Use</button>
           </div>

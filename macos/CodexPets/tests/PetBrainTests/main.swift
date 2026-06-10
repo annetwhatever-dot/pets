@@ -444,6 +444,35 @@ private func testOverlayHitTestingMakesWholePetBodyDraggable() {
     expect(view.containsInteractivePoint(lowerBodyPoint), "lower pet overlay should be draggable")
 }
 
+private func testOverlayRightClickRequestsPetBrowser() {
+    let view = PetOverlayView(frame: NSRect(x: 0, y: 0, width: 190, height: 235))
+    let pet = PetPackage(
+        slug: "test",
+        displayName: "Test Pet",
+        detail: "Test",
+        kind: "pet",
+        source: .app,
+        directory: URL(fileURLWithPath: "/tmp"),
+        spritesheet: URL(fileURLWithPath: "/tmp/missing-spritesheet.png"),
+        frameWidth: 192,
+        frameHeight: 208,
+        states: PetAnimationState.defaults
+    )
+    view.setPet(pet, state: PetAnimationState.defaults[0], scale: 0.76, playback: .staticFrame(0))
+
+    var rightClicks = 0
+    view.rightClickHandler = {
+        rightClicks += 1
+    }
+    view.handleRightClick(at: NSPoint(x: view.petBodyHitRect.midX, y: view.petBodyHitRect.midY), activateApp: false)
+    expect(rightClicks == 1, "right-clicking the pet body should request the pet browser")
+
+    view.bubbleText = "hello"
+    view.bubbleActionHandler = {}
+    view.handleRightClick(at: NSPoint(x: view.bubbleRect.midX, y: view.bubbleRect.midY), activateApp: false)
+    expect(rightClicks == 1, "right-clicking a murmur bubble should not open the pet browser")
+}
+
 private func testPetdexManifestParserSupportsV1AndV2() {
     let v1 = Data("""
     {
@@ -582,6 +611,8 @@ private func testPetdexBrowserBridgeActionAllowlist() {
             "listInstalledPets",
             "selectInstalledPet",
             "installPiExtension",
+            "uninstallPiExtension",
+            "getPiExtensionStatus",
         ]),
         "native bridge should expose only the expected allowlisted actions"
     )
@@ -610,9 +641,33 @@ private func testPiExtensionInstallerCopiesExtensionIntoPiDirectory() {
         destinationDirectory: destinationDirectory
     )
     let installedText = try! String(contentsOf: installed, encoding: .utf8)
+    let currentStatus = PetdexBrowserWindowController.piExtensionStatusPayload(
+        sourceURL: sourceURL,
+        destinationDirectory: destinationDirectory
+    )
 
     expect(installed.lastPathComponent == "codex-pets.ts", "Pi extension installer should use a stable app-owned file name")
     expect(installedText == "new extension", "Pi extension installer should copy and update the bundled extension")
+    expect(currentStatus["available"] as? Bool == true, "Pi extension status should report bundled source availability")
+    expect(currentStatus["installed"] as? Bool == true, "Pi extension status should report installed file")
+    expect(currentStatus["needsUpdate"] as? Bool == false, "Pi extension status should not offer reinstall when contents match")
+
+    try! Data("updated extension".utf8).write(to: sourceURL)
+    let staleStatus = PetdexBrowserWindowController.piExtensionStatusPayload(
+        sourceURL: sourceURL,
+        destinationDirectory: destinationDirectory
+    )
+    expect(staleStatus["needsUpdate"] as? Bool == true, "Pi extension status should offer update when bundled contents change")
+
+    let removed = try! PetdexBrowserWindowController.uninstallPiExtension(destinationDirectory: destinationDirectory)
+    let removedStatus = PetdexBrowserWindowController.piExtensionStatusPayload(
+        sourceURL: sourceURL,
+        destinationDirectory: destinationDirectory
+    )
+    expect(removed == installed, "Pi extension uninstaller should target the installed extension path")
+    expect(!FileManager.default.fileExists(atPath: installed.path), "Pi extension uninstaller should remove the installed file")
+    expect(removedStatus["installed"] as? Bool == false, "Pi extension status should report uninstalled file")
+    expect(removedStatus["needsUpdate"] as? Bool == false, "Pi extension status should not offer update after uninstall")
 }
 
 private func testPetdexBrowserBridgePetPayloadValidation() {
@@ -739,6 +794,79 @@ private func testInAppDaemonServesPiProtocolOverUnixSocket() {
     let tools = sessions?.first?["tools"] as? [[String: Any]]
     expect(tools?.first?["state"] as? String == "running", "in-app daemon should track tool update state")
     expect(tools?.first?["safeSummary"] as? String == "bash running", "in-app daemon should track safe tool summaries")
+
+    let removed = daemonRequest(
+        socketPath: socketPath,
+        method: "session.remove",
+        payload: ["sessionId": "swift-test"]
+    )
+    let removedPayload = removed["payload"] as? [String: Any]
+    expect(removedPayload?["attention"] as? String == "idle", "in-app daemon should return to idle when a session is removed")
+    expect((removedPayload?["sessions"] as? [[String: Any]])?.isEmpty == true, "in-app daemon should remove terminated sessions")
+
+    let lateTool = daemonRequest(
+        socketPath: socketPath,
+        method: "tool.start",
+        payload: [
+            "sessionId": "swift-test",
+            "toolCallId": "late-tool",
+            "toolName": "bash",
+        ]
+    )
+    let lateToolPayload = lateTool["payload"] as? [String: Any]
+    expect((lateToolPayload?["sessions"] as? [[String: Any]])?.isEmpty == true, "late tool events should not recreate removed sessions")
+
+    _ = daemonRequest(
+        socketPath: socketPath,
+        method: "session.upsert",
+        payload: [
+            "sessionId": "approval-test",
+            "status": "running",
+        ]
+    )
+    final class ApprovalResultBox {
+        var payload: [String: Any]?
+    }
+    let approvalResult = ApprovalResultBox()
+    let approvalFinished = DispatchSemaphore(value: 0)
+    DispatchQueue.global(qos: .utility).async {
+        let response = daemonRequest(
+            socketPath: socketPath,
+            method: "approval.request",
+            payload: [
+                "approvalId": "approval-1",
+                "sessionId": "approval-test",
+                "toolName": "bash",
+                "timeoutMillis": 5000,
+            ]
+        )
+        approvalResult.payload = response["payload"] as? [String: Any]
+        approvalFinished.signal()
+    }
+
+    var sawPendingApproval = false
+    for _ in 0..<50 {
+        let snapshotResponse = daemonRequest(socketPath: socketPath, method: "snapshot.get", payload: [:])
+        let snapshotPayload = snapshotResponse["payload"] as? [String: Any]
+        if (snapshotPayload?["pendingApprovals"] as? [[String: Any]])?.count == 1 {
+            sawPendingApproval = true
+            break
+        }
+        usleep(20_000)
+    }
+    expect(sawPendingApproval, "in-app daemon should expose pending approval before session removal")
+
+    let removedWithApproval = daemonRequest(
+        socketPath: socketPath,
+        method: "session.remove",
+        payload: ["sessionId": "approval-test"]
+    )
+    let removedWithApprovalPayload = removedWithApproval["payload"] as? [String: Any]
+    expect(removedWithApprovalPayload?["attention"] as? String == "idle", "session removal should clear approval attention")
+    expect((removedWithApprovalPayload?["pendingApprovals"] as? [[String: Any]])?.isEmpty == true, "session removal should clear pending approvals")
+    expect(approvalFinished.wait(timeout: .now() + .seconds(2)) == .success, "session removal should unblock pending approval requests")
+    expect(approvalResult.payload?["decision"] as? String == "expired", "session removal should expire pending approval requests")
+    expect(approvalResult.payload?["reason"] as? String == "session terminated", "session removal approval reason should explain termination")
 }
 
 private func daemonRequest(socketPath: String, method: String, payload: [String: Any]) -> [String: Any] {
@@ -819,6 +947,7 @@ let tests: [(String, () -> Void)] = [
     ("pet brain curated workflow murmurs", testPetBrainUsesCuratedMurmursForWorkflowStatus),
     ("bubble dismissal mutes murmurs", testPetBrainDismissedBubbleMutesMurmursForHours),
     ("overlay hit testing makes whole pet body draggable", testOverlayHitTestingMakesWholePetBodyDraggable),
+    ("overlay right-click opens pet browser", testOverlayRightClickRequestsPetBrowser),
     ("Petdex manifest parser supports v1 and v2", testPetdexManifestParserSupportsV1AndV2),
     ("downloaded Petdex import writes local package", testDownloadedPetdexImportWritesPackageSafely),
     ("daemon snapshot presenter maps attention", testDaemonSnapshotPresenterMapsAttentionPriority),

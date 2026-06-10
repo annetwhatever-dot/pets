@@ -18,9 +18,15 @@ import (
 func main() {
 	socketPath := flag.String("socket", daemon.DefaultSocketPath(), "Pi Pet daemon Unix socket path")
 	installPiExtension := flag.Bool("install-pi-extension", false, "Install the Pi extension into ~/.pi/agent/extensions and exit")
+	uninstallPiExtension := flag.Bool("uninstall-pi-extension", false, "Uninstall the Pi extension from ~/.pi/agent/extensions and exit")
 	piExtensionSource := flag.String("pi-extension-source", "", "Pi extension source file for -install-pi-extension")
-	piExtensionDir := flag.String("pi-extension-dir", "", "Pi extension install directory for -install-pi-extension")
+	piExtensionDir := flag.String("pi-extension-dir", "", "Pi extension install directory for -install-pi-extension or -uninstall-pi-extension")
 	flag.Parse()
+
+	if *installPiExtension && *uninstallPiExtension {
+		fmt.Fprintln(os.Stderr, "pi-pet-overlay-x11: choose only one of -install-pi-extension or -uninstall-pi-extension")
+		os.Exit(2)
+	}
 
 	if *installPiExtension {
 		installedPath, err := piinstall.Install(piinstall.Options{
@@ -32,6 +38,18 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("Installed Pi extension to %s\n", installedPath)
+		return
+	}
+
+	if *uninstallPiExtension {
+		removedPath, err := piinstall.Uninstall(piinstall.Options{
+			DestinationDir: *piExtensionDir,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pi-pet-overlay-x11: uninstall Pi extension: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Uninstalled Pi extension from %s\n", removedPath)
 		return
 	}
 

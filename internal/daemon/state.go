@@ -17,6 +17,7 @@ type Store struct {
 	snapshot  protocol.Snapshot
 	waiters   map[string]chan protocol.ApprovalDecision
 	completed map[string]protocol.ApprovalDecision
+	removed   map[string]struct{}
 }
 
 func NewStore() *Store {
@@ -37,6 +38,7 @@ func NewStoreWithClock(now func() time.Time) *Store {
 		},
 		waiters:   map[string]chan protocol.ApprovalDecision{},
 		completed: map[string]protocol.ApprovalDecision{},
+		removed:   map[string]struct{}{},
 	}
 }
 
@@ -55,6 +57,7 @@ func (s *Store) UpsertSession(input protocol.SessionUpsert) protocol.Snapshot {
 	if id == "" {
 		id = "default"
 	}
+	delete(s.removed, id)
 	status := protocol.NormalizeStatus(input.Status)
 	found := false
 	for i := range s.snapshot.Sessions {
@@ -91,6 +94,7 @@ func (s *Store) RemoveSession(input protocol.SessionRemove) protocol.Snapshot {
 	if id == "" {
 		return cloneSnapshot(s.snapshot)
 	}
+	s.removed[id] = struct{}{}
 	next := s.snapshot.Sessions[:0]
 	for _, session := range s.snapshot.Sessions {
 		if session.ID != id {
@@ -98,6 +102,27 @@ func (s *Store) RemoveSession(input protocol.SessionRemove) protocol.Snapshot {
 		}
 	}
 	s.snapshot.Sessions = next
+
+	nextApprovals := s.snapshot.PendingApprovals[:0]
+	for _, pending := range s.snapshot.PendingApprovals {
+		if pending.SessionID == id {
+			decision := protocol.ApprovalDecision{
+				ApprovalID: pending.ID,
+				Decision:   protocol.ApprovalExpired,
+				Reason:     "session terminated",
+			}
+			s.completed[pending.ID] = decision
+			if ch := s.waiters[pending.ID]; ch != nil {
+				ch <- decision
+				close(ch)
+				delete(s.waiters, pending.ID)
+			}
+			continue
+		}
+		nextApprovals = append(nextApprovals, pending)
+	}
+	s.snapshot.PendingApprovals = nextApprovals
+
 	s.finishMutationLocked(s.now().UTC())
 	return cloneSnapshot(s.snapshot)
 }
@@ -107,7 +132,11 @@ func (s *Store) ToolStart(input protocol.ToolUpdate) protocol.Snapshot {
 	defer s.mu.Unlock()
 
 	ts := s.now().UTC()
-	session := s.ensureSessionLocked(strings.TrimSpace(input.SessionID), ts)
+	sessionID := normalizedSessionID(input.SessionID)
+	if s.isRemovedSessionLocked(sessionID) {
+		return cloneSnapshot(s.snapshot)
+	}
+	session := s.ensureSessionLocked(sessionID, ts)
 	toolID := strings.TrimSpace(input.ToolCallID)
 	if toolID == "" {
 		toolID = input.ToolName + "-" + ts.Format("150405.000000000")
@@ -144,7 +173,11 @@ func (s *Store) ToolUpdate(input protocol.ToolUpdate) protocol.Snapshot {
 	defer s.mu.Unlock()
 
 	ts := s.now().UTC()
-	session := s.ensureSessionLocked(strings.TrimSpace(input.SessionID), ts)
+	sessionID := normalizedSessionID(input.SessionID)
+	if s.isRemovedSessionLocked(sessionID) {
+		return cloneSnapshot(s.snapshot)
+	}
+	session := s.ensureSessionLocked(sessionID, ts)
 	toolID := strings.TrimSpace(input.ToolCallID)
 	if toolID == "" {
 		toolID = input.ToolName + "-" + ts.Format("150405.000000000")
@@ -186,7 +219,11 @@ func (s *Store) ToolEnd(input protocol.ToolUpdate) protocol.Snapshot {
 	defer s.mu.Unlock()
 
 	ts := s.now().UTC()
-	session := s.ensureSessionLocked(strings.TrimSpace(input.SessionID), ts)
+	sessionID := normalizedSessionID(input.SessionID)
+	if s.isRemovedSessionLocked(sessionID) {
+		return cloneSnapshot(s.snapshot)
+	}
+	session := s.ensureSessionLocked(sessionID, ts)
 	state := protocol.NormalizeToolState(input.State)
 	if state == protocol.ToolRunning {
 		state = protocol.ToolDone
@@ -212,18 +249,42 @@ func (s *Store) AddApproval(input protocol.ApprovalRequest) (protocol.PendingApp
 	defer s.mu.Unlock()
 
 	ts := s.now().UTC()
+	sessionID := clamp(input.SessionID, 120)
+	toolCallID := clamp(input.ToolCallID, 120)
 	id := strings.TrimSpace(input.ApprovalID)
 	if id == "" {
-		id = input.SessionID + ":" + input.ToolCallID
+		id = sessionID + ":" + toolCallID
 	}
 	if id == ":" {
 		id = "approval-" + ts.Format("150405.000000000")
 	}
 
+	if _, removed := s.removed[sessionID]; sessionID != "" && removed {
+		decision := protocol.ApprovalDecision{
+			ApprovalID: id,
+			Decision:   protocol.ApprovalExpired,
+			Reason:     "session terminated",
+		}
+		ch := make(chan protocol.ApprovalDecision, 1)
+		ch <- decision
+		close(ch)
+		s.completed[id] = decision
+		s.finishMutationLocked(ts)
+		return protocol.PendingApproval{
+			ID:         id,
+			SessionID:  sessionID,
+			ToolCallID: toolCallID,
+			ToolName:   clamp(input.ToolName, 80),
+			State:      protocol.ApprovalExpired,
+			CreatedAt:  ts,
+			UpdatedAt:  ts,
+		}, ch, cloneSnapshot(s.snapshot)
+	}
+
 	pending := protocol.PendingApproval{
 		ID:             id,
-		SessionID:      clamp(input.SessionID, 120),
-		ToolCallID:     clamp(input.ToolCallID, 120),
+		SessionID:      sessionID,
+		ToolCallID:     toolCallID,
 		ToolName:       clamp(input.ToolName, 80),
 		CommandSummary: safeSummary(input.CommandSummary),
 		Risk:           clamp(input.Risk, 80),
@@ -370,9 +431,7 @@ func (s *Store) ExpireApproval(id string) (bool, protocol.Snapshot) {
 }
 
 func (s *Store) ensureSessionLocked(id string, ts time.Time) *protocol.Session {
-	if id == "" {
-		id = "default"
-	}
+	id = normalizedSessionID(id)
 	for i := range s.snapshot.Sessions {
 		if s.snapshot.Sessions[i].ID == id {
 			return &s.snapshot.Sessions[i]
@@ -385,6 +444,11 @@ func (s *Store) ensureSessionLocked(id string, ts time.Time) *protocol.Session {
 		UpdatedAt: ts,
 	})
 	return &s.snapshot.Sessions[len(s.snapshot.Sessions)-1]
+}
+
+func (s *Store) isRemovedSessionLocked(id string) bool {
+	_, removed := s.removed[normalizedSessionID(id)]
+	return removed
 }
 
 func (s *Store) finishMutationLocked(ts time.Time) {
@@ -478,6 +542,14 @@ func sanitizePet(pet protocol.PetRef) protocol.PetRef {
 		License:     clamp(pet.License, 120),
 		Attribution: clamp(pet.Attribution, 240),
 	}
+}
+
+func normalizedSessionID(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "default"
+	}
+	return id
 }
 
 func safeSummary(value string) string {

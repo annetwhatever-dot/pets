@@ -95,6 +95,28 @@ test("client sends approval request through transport and resolves response", as
 	assert.equal(decision.decision, "approved");
 });
 
+test("client sends session removal notifications", async () => {
+	const requests: Array<{ method: string; payload: unknown }> = [];
+	const client = new PiPetClient({
+		requestTimeoutMillis: 1000,
+		transport: async (request) => {
+			requests.push({ method: request.method, payload: request.payload });
+			return {
+				version: 1,
+				kind: "response",
+				id: request.id,
+				method: request.method,
+				payload: { ok: true },
+			};
+		},
+	});
+
+	client.notifySessionRemove({ sessionId: "s1" });
+	await client.flushNotifications();
+
+	assert.deepEqual(requests, [{ method: "session.remove", payload: { sessionId: "s1" } }]);
+});
+
 test("client serializes notifications before approval request", async () => {
 	const methods: string[] = [];
 	const client = new PiPetClient({
@@ -285,8 +307,30 @@ test("Pi extension hooks drive daemon snapshots and approval flow over Unix sock
 	assert.equal(snapshot.sessions[0].safeSummary, "provider HTTP 500");
 
 	await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "exit" }, ctx);
-	snapshot = await overlay.nextSnapshot((item) => item.sessions?.[0]?.status === "disconnected");
-	assert.equal(snapshot.attention, "failed");
+	snapshot = await overlay.nextSnapshot((item) => item.attention === "idle" && item.sessions?.length === 0);
+	assert.equal(snapshot.pendingApprovals.length, 0);
+
+	await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, ctx);
+	snapshot = await overlay.nextSnapshot((item) => item.sessions?.[0]?.status === "idle");
+	assert.equal(snapshot.sessions[0].id, "pi-session-1");
+
+	const interruptedApprovalPromise = handlers.get("tool_call")?.(
+		{
+			type: "tool_call",
+			toolCallId: "tool-2",
+			toolName: "bash",
+			input: { command: "git push origin main" },
+		},
+		ctx,
+	);
+	snapshot = await overlay.nextSnapshot((item) => item.attention === "approval_required");
+	assert.equal(snapshot.pendingApprovals.length, 1);
+
+	await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "exit" }, ctx);
+	snapshot = await overlay.nextSnapshot(
+		(item) => item.attention === "idle" && item.sessions?.length === 0 && item.pendingApprovals?.length === 0,
+	);
+	assert.deepEqual(await interruptedApprovalPromise, { block: true, reason: "session terminated" });
 });
 
 async function startDaemon(t: { after(callback: () => void | Promise<void>): void }) {

@@ -152,7 +152,7 @@ async function stopProcess(child) {
   }
 }
 
-async function stopProcessByCommand(commandFragment) {
+async function stopProcessByCommand(commandPath) {
   let output = "";
   try {
     output = await run("ps", ["-axo", "pid=,command="], { cwd: root });
@@ -167,7 +167,8 @@ async function stopProcessByCommand(commandFragment) {
       if (space === -1) return null;
       const pid = Number(trimmed.slice(0, space));
       const command = trimmed.slice(space + 1);
-      return Number.isFinite(pid) && command.includes(commandFragment) ? pid : null;
+      const isAppProcess = command === commandPath || command.startsWith(`${commandPath} `);
+      return Number.isFinite(pid) && isAppProcess ? pid : null;
     })
     .filter((pid) => pid && pid !== process.pid);
   for (const pid of pids) {

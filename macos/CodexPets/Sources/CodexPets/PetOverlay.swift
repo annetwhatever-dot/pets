@@ -25,6 +25,7 @@ final class PetOverlayController: NSObject {
     var attentionMode: PetAttentionMode { brain.mode }
     var bubbleMode: PetBubbleMode { brain.bubbleMode }
     var reduceMotion: Bool { brain.reduceMotion }
+    var petBrowserRequestedHandler: (() -> Void)?
 
     override init() {
         self.rootView = PetOverlayView(
@@ -68,6 +69,9 @@ final class PetOverlayController: NSObject {
         }
         rootView.clickHandler = { [weak self] count in
             self?.handleDirectSignal(.clicked(count: count))
+        }
+        rootView.rightClickHandler = { [weak self] in
+            self?.petBrowserRequestedHandler?()
         }
         rootView.bubbleActionHandler = { [weak self] in
             self?.dismissBubbleAndMute()
@@ -444,6 +448,7 @@ final class PetOverlayController: NSObject {
 final class PetOverlayView: NSView {
     var windowDragHandler: ((NSPoint) -> Void)?
     var clickHandler: ((Int) -> Void)?
+    var rightClickHandler: (() -> Void)?
     var dragMovedHandler: ((NSPoint) -> Void)?
     var dragEndedHandler: (() -> Void)?
     var bubbleActionHandler: (() -> Void)?
@@ -607,7 +612,15 @@ final class PetOverlayView: NSView {
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        NSApp.activate(ignoringOtherApps: true)
+        handleRightClick(at: convert(event.locationInWindow, from: nil))
+    }
+
+    func handleRightClick(at point: NSPoint, activateApp: Bool = true) {
+        guard containsPetBodyPoint(point) else { return }
+        if activateApp {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        rightClickHandler?()
     }
 
     private func startPlayback(_ mode: PetPlaybackMode) {

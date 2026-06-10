@@ -272,6 +272,7 @@ private final class InAppDaemonState {
     private var sessions: [String: InAppSession] = [:]
     private var pendingApprovals: [String: InAppApproval] = [:]
     private var waiters: [String: ApprovalWaiter] = [:]
+    private var removedSessions = Set<String>()
     private var selectedPetID: String?
     private var installedPets: [[String: Any]] = []
     private var catalogs: [String: [String: Any]] = [:]
@@ -301,6 +302,7 @@ private final class InAppDaemonState {
     func upsertSession(_ payload: [String: Any]) {
         let now = Date()
         let id = cleanString(payload["sessionId"]) ?? "default"
+        removedSessions.remove(id)
         let status = normalizeStatus(cleanString(payload["status"]))
         if var session = sessions[id] {
             session.cwd = clamp(cleanString(payload["cwd"]), max: 240)
@@ -326,11 +328,27 @@ private final class InAppDaemonState {
     func removeSession(_ payload: [String: Any]) {
         guard let id = cleanString(payload["sessionId"]) else { return }
         sessions.removeValue(forKey: id)
+        removedSessions.insert(id)
+        let approvalIDs = pendingApprovals.values
+            .filter { $0.sessionID == id }
+            .map(\.id)
+        for approvalID in approvalIDs {
+            pendingApprovals.removeValue(forKey: approvalID)
+            if let waiter = waiters.removeValue(forKey: approvalID) {
+                waiter.decision = [
+                    "approvalId": approvalID,
+                    "decision": "expired",
+                    "reason": "session terminated",
+                ]
+                waiter.semaphore.signal()
+            }
+        }
     }
 
     func toolStart(_ payload: [String: Any]) {
         let now = Date()
         let sessionID = cleanString(payload["sessionId"]) ?? "default"
+        guard !removedSessions.contains(sessionID) else { return }
         var session = ensureSession(id: sessionID, now: now)
         let toolID = cleanString(payload["toolCallId"]) ?? "\(cleanString(payload["toolName"]) ?? "tool")-\(Int(now.timeIntervalSince1970 * 1000))"
         session.tools[toolID] = InAppTool(
@@ -350,6 +368,7 @@ private final class InAppDaemonState {
     func toolUpdate(_ payload: [String: Any]) {
         let now = Date()
         let sessionID = cleanString(payload["sessionId"]) ?? "default"
+        guard !removedSessions.contains(sessionID) else { return }
         var session = ensureSession(id: sessionID, now: now)
         let toolID = cleanString(payload["toolCallId"]) ?? "\(cleanString(payload["toolName"]) ?? "tool")-\(Int(now.timeIntervalSince1970 * 1000))"
         let name = clamp(cleanString(payload["toolName"]), max: 80) ?? "tool"
@@ -382,6 +401,7 @@ private final class InAppDaemonState {
     func toolEnd(_ payload: [String: Any]) {
         let now = Date()
         let sessionID = cleanString(payload["sessionId"]) ?? "default"
+        guard !removedSessions.contains(sessionID) else { return }
         var session = ensureSession(id: sessionID, now: now)
         let toolID = cleanString(payload["toolCallId"]) ?? ""
         let state = normalizeToolState(cleanString(payload["state"]))
@@ -403,8 +423,19 @@ private final class InAppDaemonState {
         let sessionID = cleanString(payload["sessionId"]) ?? "default"
         let toolCallID = cleanString(payload["toolCallId"])
         let id = cleanString(payload["approvalId"]) ?? "\(sessionID):\(toolCallID ?? "")"
+        let approvalID = id == ":" ? "approval-\(Int(now.timeIntervalSince1970 * 1000))" : id
+        if removedSessions.contains(sessionID) {
+            let waiter = ApprovalWaiter()
+            waiter.decision = [
+                "approvalId": approvalID,
+                "decision": "expired",
+                "reason": "session terminated",
+            ]
+            waiter.semaphore.signal()
+            return (approvalID, waiter)
+        }
         let approval = InAppApproval(
-            id: id == ":" ? "approval-\(Int(now.timeIntervalSince1970 * 1000))" : id,
+            id: approvalID,
             sessionID: sessionID,
             toolCallID: toolCallID,
             toolName: clamp(cleanString(payload["toolName"]), max: 80) ?? "tool",

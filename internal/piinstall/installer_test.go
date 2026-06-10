@@ -50,3 +50,28 @@ func TestInstallReportsMissingExplicitSource(t *testing.T) {
 		t.Fatal("Install succeeded with a missing source")
 	}
 }
+
+func TestUninstallRemovesExtension(t *testing.T) {
+	destinationDir := t.TempDir()
+	destinationPath := filepath.Join(destinationDir, InstalledFileName)
+	if err := os.WriteFile(destinationPath, []byte("extension"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	removedPath, err := Uninstall(Options{DestinationDir: destinationDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removedPath != destinationPath {
+		t.Fatalf("removed path = %q, want %q", removedPath, destinationPath)
+	}
+	if _, err := os.Stat(destinationPath); !os.IsNotExist(err) {
+		t.Fatalf("installed extension still exists: %v", err)
+	}
+}
+
+func TestUninstallAllowsAlreadyMissingExtension(t *testing.T) {
+	if _, err := Uninstall(Options{DestinationDir: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+}

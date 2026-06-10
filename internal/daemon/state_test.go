@@ -77,6 +77,89 @@ func TestApprovalBrokerDoesNotStoreRawPayload(t *testing.T) {
 	}
 }
 
+func TestRemoveSessionExpiresPendingApprovals(t *testing.T) {
+	store := NewStore()
+	_, decisions, _ := store.AddApproval(protocol.ApprovalRequest{
+		ApprovalID: "a1",
+		SessionID:  "s1",
+		ToolName:   "bash",
+	})
+	store.UpsertSession(protocol.SessionUpsert{SessionID: "s1", Status: protocol.SessionRunning})
+
+	snapshot := store.RemoveSession(protocol.SessionRemove{SessionID: "s1"})
+	if len(snapshot.Sessions) != 0 {
+		t.Fatalf("sessions = %+v, want none", snapshot.Sessions)
+	}
+	if len(snapshot.PendingApprovals) != 0 {
+		t.Fatalf("pending approvals = %+v, want none", snapshot.PendingApprovals)
+	}
+	if snapshot.Attention != protocol.AttentionIdle {
+		t.Fatalf("attention = %s, want idle", snapshot.Attention)
+	}
+
+	select {
+	case decision := <-decisions:
+		if decision.Decision != protocol.ApprovalExpired {
+			t.Fatalf("decision = %s, want expired", decision.Decision)
+		}
+		if decision.Reason != "session terminated" {
+			t.Fatalf("reason = %q, want session terminated", decision.Reason)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pending approval was not released")
+	}
+
+	_, lateDecisions, snapshot := store.AddApproval(protocol.ApprovalRequest{
+		ApprovalID: "late",
+		SessionID:  "s1",
+		ToolName:   "bash",
+	})
+	if len(snapshot.PendingApprovals) != 0 {
+		t.Fatalf("late pending approvals = %+v, want none", snapshot.PendingApprovals)
+	}
+	select {
+	case decision := <-lateDecisions:
+		if decision.Decision != protocol.ApprovalExpired {
+			t.Fatalf("late decision = %s, want expired", decision.Decision)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("late approval was not released")
+	}
+
+	snapshot = store.ToolStart(protocol.ToolUpdate{
+		SessionID:   "s1",
+		ToolCallID:  "late-tool",
+		ToolName:    "bash",
+		SafeSummary: "late tool",
+	})
+	if len(snapshot.Sessions) != 0 {
+		t.Fatalf("late tool recreated removed session: %+v", snapshot.Sessions)
+	}
+
+	store.UpsertSession(protocol.SessionUpsert{SessionID: "s1", Status: protocol.SessionRunning})
+	store.ToolStart(protocol.ToolUpdate{
+		SessionID:   "s1",
+		ToolCallID:  "after-restart-tool",
+		ToolName:    "bash",
+		SafeSummary: "after restart",
+	})
+	store.AddApproval(protocol.ApprovalRequest{
+		ApprovalID: "after-restart",
+		SessionID:  "s1",
+		ToolName:   "bash",
+	})
+	restarted := store.Snapshot()
+	if got := len(restarted.Sessions); got != 1 {
+		t.Fatalf("sessions after restart = %d, want 1", got)
+	}
+	if got := len(restarted.Sessions[0].Tools); got != 1 {
+		t.Fatalf("tools after restart = %d, want 1", got)
+	}
+	if got := len(restarted.PendingApprovals); got != 1 {
+		t.Fatalf("pending approvals after restart = %d, want 1", got)
+	}
+}
+
 func TestToolUpdateDoesNotRestartRunningTool(t *testing.T) {
 	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
 	store := NewStoreWithClock(func() time.Time { return now })

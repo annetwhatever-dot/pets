@@ -26,6 +26,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guiSmokeRecorder?.recordLaunch()
 
         pets = store.scan()
+        overlay.petBrowserRequestedHandler = { [weak self] in
+            self?.openPetdexBrowser()
+        }
 
         setupStatusItem()
         loadOverlaySettings()

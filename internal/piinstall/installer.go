@@ -28,8 +28,20 @@ func Install(options Options) (string, error) {
 		return "", err
 	}
 
-	destinationPath := filepath.Join(destinationDir, InstalledFileName)
+	destinationPath := installedPath(destinationDir)
 	if err := copyFile(sourcePath, destinationPath); err != nil {
+		return "", err
+	}
+	return destinationPath, nil
+}
+
+func Uninstall(options Options) (string, error) {
+	destinationDir, err := destinationDir(options.DestinationDir)
+	if err != nil {
+		return "", err
+	}
+	destinationPath := installedPath(destinationDir)
+	if err := os.Remove(destinationPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
 	return destinationPath, nil
@@ -74,6 +86,10 @@ func destinationDir(explicit string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".pi", "agent", "extensions"), nil
+}
+
+func installedPath(destinationDir string) string {
+	return filepath.Join(destinationDir, InstalledFileName)
 }
 
 func copyFile(sourcePath string, destinationPath string) error {

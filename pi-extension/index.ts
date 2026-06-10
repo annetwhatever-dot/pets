@@ -40,6 +40,10 @@ type SessionPayload = {
 	safeSummary?: string;
 };
 
+type SessionRemovePayload = {
+	sessionId: string;
+};
+
 type ToolPayload = {
 	sessionId: string;
 	toolCallId: string;
@@ -81,8 +85,8 @@ export default function piPetExtension(pi: ExtensionAPI): void {
 		client.notifySession(sessionPayload(ctx, "idle", `session ${event.reason}`));
 	});
 
-	pi.on("session_shutdown", (event, ctx) => {
-		client.notifySession(sessionPayload(ctx, "disconnected", `session ${event.reason}`));
+	pi.on("session_shutdown", (_event, ctx) => {
+		client.notifySessionRemove(sessionRemovePayload(ctx));
 	});
 
 	pi.on("before_agent_start", (_event, ctx) => {
@@ -155,6 +159,10 @@ export class PiPetClient {
 
 	notifySession(payload: SessionPayload): void {
 		this.enqueueNotification(METHOD_SESSION_UPSERT, payload);
+	}
+
+	notifySessionRemove(payload: SessionRemovePayload): void {
+		this.enqueueNotification(METHOD_SESSION_REMOVE, payload);
 	}
 
 	notifyToolStart(payload: ToolPayload): void {
@@ -331,6 +339,12 @@ export function sessionPayload(ctx: MinimalContext, status: SessionStatus, safeS
 		title: sessionTitle(ctx),
 		status,
 		safeSummary: safeSummary ? safeSummary : undefined,
+	};
+}
+
+export function sessionRemovePayload(ctx: MinimalContext): SessionRemovePayload {
+	return {
+		sessionId: sessionID(ctx),
 	};
 }
 

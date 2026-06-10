@@ -345,6 +345,8 @@ enum PetdexBrowserBridgeAction: String, CaseIterable {
     case listInstalledPets
     case selectInstalledPet
     case installPiExtension
+    case uninstallPiExtension
+    case getPiExtensionStatus
 }
 
 enum PiExtensionInstallError: Error, LocalizedError {
@@ -363,14 +365,9 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
         static let browserResourceDirectory = "PetdexBrowser"
         static let piExtensionResourceDirectory = "PiExtension"
         static let piExtensionInstalledFileName = "codex-pets.ts"
-        static let initialSize = NSRect(x: 0, y: 0, width: 860, height: 560)
-        static let minimumSize = NSSize(width: 680, height: 460)
-        static let backgroundColor = NSColor(
-            srgbRed: 236.0 / 255.0,
-            green: 239.0 / 255.0,
-            blue: 241.0 / 255.0,
-            alpha: 1
-        )
+        static let initialSize = NSRect(x: 0, y: 0, width: 980, height: 640)
+        static let minimumSize = NSSize(width: 820, height: 560)
+        static var backgroundColor: NSColor { .windowBackgroundColor }
     }
 
     private let store: PetStore
@@ -459,6 +456,10 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
             selectInstalledPet(from: body["petId"])
         case .installPiExtension:
             installPiExtension()
+        case .uninstallPiExtension:
+            uninstallPiExtension()
+        case .getPiExtensionStatus:
+            sendPiExtensionStatus()
         }
     }
 
@@ -553,18 +554,15 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
         guard let contentView = window?.contentView else { return }
 
         contentView.wantsLayer = true
-        contentView.layer?.backgroundColor = Constants.backgroundColor.cgColor
 
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.alphaValue = 0
         webView.translatesAutoresizingMaskIntoConstraints = false
         webView.wantsLayer = true
-        webView.layer?.backgroundColor = Constants.backgroundColor.cgColor
         contentView.addSubview(webView)
 
         loadingView.wantsLayer = true
-        loadingView.layer?.backgroundColor = Constants.backgroundColor.cgColor
         loadingView.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(loadingView)
 
@@ -587,6 +585,19 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
             statusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: loadingView.leadingAnchor, constant: 24),
             statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: loadingView.trailingAnchor, constant: -24),
         ])
+
+        applyNativeThemeBackground()
+    }
+
+    private func applyNativeThemeBackground() {
+        let background = Constants.backgroundColor
+        window?.backgroundColor = background
+        window?.contentView?.layer?.backgroundColor = background.cgColor
+        webView.layer?.backgroundColor = background.cgColor
+        loadingView.layer?.backgroundColor = background.cgColor
+        if #available(macOS 11.0, *) {
+            webView.underPageBackgroundColor = background
+        }
     }
 
     private func showLoadingStatus(_ message: String) {
@@ -622,6 +633,7 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
             detail: [:]
         )
         sendInstalledPets()
+        sendPiExtensionStatus()
     }
 
     private func reportBrowserLoadedForSmoke() {
@@ -713,23 +725,68 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
     private func installPiExtension() {
         do {
             let destination = try Self.installPiExtension()
+            let status = Self.piExtensionStatusPayload()
             evaluateJavaScriptEvent(
                 name: "codex-pets-native-pi-install-result",
                 detail: [
                     "ok": true,
                     "message": "Installed Pi extension to \(destination.path)",
                     "path": destination.path,
+                    "available": status["available"] ?? true,
+                    "installed": status["installed"] ?? true,
+                    "needsUpdate": status["needsUpdate"] ?? false,
                 ]
             )
         } catch {
+            let status = Self.piExtensionStatusPayload()
             evaluateJavaScriptEvent(
                 name: "codex-pets-native-pi-install-result",
                 detail: [
                     "ok": false,
                     "message": error.localizedDescription,
+                    "available": status["available"] ?? false,
+                    "installed": status["installed"] ?? false,
+                    "needsUpdate": status["needsUpdate"] ?? false,
                 ]
             )
         }
+    }
+
+    private func uninstallPiExtension() {
+        do {
+            let destination = try Self.uninstallPiExtension()
+            let status = Self.piExtensionStatusPayload()
+            evaluateJavaScriptEvent(
+                name: "codex-pets-native-pi-uninstall-result",
+                detail: [
+                    "ok": true,
+                    "message": "Uninstalled Pi extension from \(destination.path)",
+                    "path": destination.path,
+                    "available": status["available"] ?? true,
+                    "installed": status["installed"] ?? false,
+                    "needsUpdate": status["needsUpdate"] ?? false,
+                ]
+            )
+        } catch {
+            let status = Self.piExtensionStatusPayload()
+            evaluateJavaScriptEvent(
+                name: "codex-pets-native-pi-uninstall-result",
+                detail: [
+                    "ok": false,
+                    "message": error.localizedDescription,
+                    "available": status["available"] ?? false,
+                    "installed": status["installed"] ?? false,
+                    "needsUpdate": status["needsUpdate"] ?? false,
+                ]
+            )
+        }
+    }
+
+    private func sendPiExtensionStatus() {
+        evaluateJavaScriptEvent(
+            name: "codex-pets-native-pi-install-status",
+            detail: Self.piExtensionStatusPayload()
+        )
     }
 
     private func installedPet(for payload: Any?) -> PetPackage? {
@@ -775,12 +832,66 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
         let destinationDirectory = explicitDestinationDirectory ?? defaultPiExtensionDirectory(fileManager: fileManager)
         try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
 
-        let destinationURL = destinationDirectory.appendingPathComponent(Constants.piExtensionInstalledFileName)
+        let destinationURL = piExtensionDestinationURL(destinationDirectory: destinationDirectory)
         if fileManager.fileExists(atPath: destinationURL.path) {
             try fileManager.removeItem(at: destinationURL)
         }
         try fileManager.copyItem(at: sourceURL, to: destinationURL)
         return destinationURL
+    }
+
+    @discardableResult
+    static func uninstallPiExtension(
+        destinationDirectory explicitDestinationDirectory: URL? = nil,
+        fileManager: FileManager = .default
+    ) throws -> URL {
+        let destinationDirectory = explicitDestinationDirectory ?? defaultPiExtensionDirectory(fileManager: fileManager)
+        let destinationURL = piExtensionDestinationURL(destinationDirectory: destinationDirectory)
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            try fileManager.removeItem(at: destinationURL)
+        }
+        return destinationURL
+    }
+
+    static func piExtensionStatusPayload(
+        sourceURL explicitSourceURL: URL? = nil,
+        destinationDirectory explicitDestinationDirectory: URL? = nil,
+        fileManager: FileManager = .default
+    ) -> [String: Any] {
+        let destinationDirectory = explicitDestinationDirectory ?? defaultPiExtensionDirectory(fileManager: fileManager)
+        let destinationURL = piExtensionDestinationURL(destinationDirectory: destinationDirectory)
+        let installed = fileManager.fileExists(atPath: destinationURL.path)
+
+        guard let sourceURL = explicitSourceURL ?? piExtensionSourceURL(fileManager: fileManager) else {
+            return [
+                "available": false,
+                "installed": installed,
+                "needsUpdate": false,
+                "path": destinationURL.path,
+                "message": PiExtensionInstallError.sourceNotFound.localizedDescription,
+            ]
+        }
+
+        return [
+            "available": true,
+            "installed": installed,
+            "needsUpdate": installed && !sameFileContents(sourceURL, destinationURL),
+            "path": destinationURL.path,
+        ]
+    }
+
+    private static func piExtensionDestinationURL(destinationDirectory: URL) -> URL {
+        destinationDirectory.appendingPathComponent(Constants.piExtensionInstalledFileName)
+    }
+
+    private static func sameFileContents(_ left: URL, _ right: URL) -> Bool {
+        guard
+            let leftData = try? Data(contentsOf: left),
+            let rightData = try? Data(contentsOf: right)
+        else {
+            return false
+        }
+        return leftData == rightData
     }
 
     private static func piExtensionSourceURL(fileManager: FileManager = .default) -> URL? {

@@ -87,8 +87,10 @@ const els = {
   sourceLabel: document.querySelector("#source-label"),
   petName: document.querySelector("#pet-name"),
   petDescription: document.querySelector("#pet-description"),
+  piExtensionStatus: document.querySelector("#pi-extension-status"),
   primaryAction: document.querySelector("#primary-action"),
   installPiAction: document.querySelector("#install-pi-action"),
+  uninstallPiAction: document.querySelector("#uninstall-pi-action"),
   rowTemplate: document.querySelector("#pet-row-template"),
 };
 
@@ -100,6 +102,13 @@ const state = {
   nativeReady: false,
   busy: false,
   piInstallBusy: false,
+  piUninstallBusy: false,
+  piExtension: {
+    available: false,
+    installed: false,
+    needsUpdate: false,
+    path: "",
+  },
   lastMessage: "",
 };
 
@@ -148,6 +157,7 @@ function bindEvents() {
 
   els.primaryAction.addEventListener("click", useSelectedPet);
   els.installPiAction.addEventListener("click", installPiExtension);
+  els.uninstallPiAction.addEventListener("click", uninstallPiExtension);
 
   window.addEventListener("codex-pets-native-ready", handleNativeReady);
   window.addEventListener("codex-pets-native-installed-pets", (event) => {
@@ -173,6 +183,20 @@ function bindEvents() {
     const detail = event.detail || {};
     state.piInstallBusy = false;
     state.lastMessage = detail.message || (detail.ok ? "Installed Pi extension" : "Could not install Pi extension");
+    updatePiExtensionState(detail);
+    requestPiExtensionStatus();
+    render();
+  });
+  window.addEventListener("codex-pets-native-pi-uninstall-result", (event) => {
+    const detail = event.detail || {};
+    state.piUninstallBusy = false;
+    state.lastMessage = detail.message || (detail.ok ? "Uninstalled Pi extension" : "Could not uninstall Pi extension");
+    updatePiExtensionState(detail);
+    requestPiExtensionStatus();
+    render();
+  });
+  window.addEventListener("codex-pets-native-pi-install-status", (event) => {
+    updatePiExtensionState(event.detail || {});
     render();
   });
 }
@@ -384,8 +408,48 @@ function updateAction() {
     (pet?.source === "petdex" || (pet?.source === "installed" && pet.nativePetId));
   els.primaryAction.disabled = !canUse;
   els.primaryAction.textContent = pet?.source === "installed" ? "Use" : "Import";
-  els.installPiAction.disabled = !state.nativeReady || state.busy || state.piInstallBusy;
-  els.installPiAction.textContent = state.piInstallBusy ? "Installing..." : "Install to Pi";
+
+  updatePiExtensionStatus();
+
+  const showPiAction =
+    state.nativeReady &&
+    state.piExtension.available &&
+    (!state.piExtension.installed || state.piExtension.needsUpdate || state.piInstallBusy);
+  els.installPiAction.hidden = !showPiAction;
+  els.installPiAction.disabled = !showPiAction || state.busy || state.piInstallBusy || state.piUninstallBusy;
+  els.installPiAction.textContent = state.piInstallBusy
+    ? "Installing..."
+    : state.piExtension.installed && state.piExtension.needsUpdate
+      ? "Update Pi"
+      : "Install to Pi";
+
+  const showUninstallPiAction =
+    state.nativeReady &&
+    state.piExtension.installed;
+  els.uninstallPiAction.hidden = !showUninstallPiAction;
+  els.uninstallPiAction.disabled =
+    !showUninstallPiAction || state.busy || state.piInstallBusy || state.piUninstallBusy;
+  els.uninstallPiAction.textContent = state.piUninstallBusy ? "Uninstalling..." : "Uninstall Pi";
+}
+
+function updatePiExtensionStatus() {
+  const status = (() => {
+    if (!state.nativeReady) return "Pi extension status unavailable";
+    if (state.piInstallBusy) return "Pi extension installing...";
+    if (state.piUninstallBusy) return "Pi extension uninstalling...";
+    if (state.piExtension.installed && !state.piExtension.available) {
+      return "Pi extension installed - source unavailable";
+    }
+    if (!state.piExtension.available) return "Pi extension source unavailable";
+    if (state.piExtension.installed && state.piExtension.needsUpdate) {
+      return "Pi extension installed - update available";
+    }
+    if (state.piExtension.installed) return "Pi extension installed";
+    return "Pi extension not installed";
+  })();
+
+  els.piExtensionStatus.textContent = status;
+  els.piExtensionStatus.title = state.piExtension.path || status;
 }
 
 function useSelectedPet() {
@@ -414,10 +478,25 @@ function useSelectedPet() {
 }
 
 function installPiExtension() {
-  if (!state.nativeReady || state.busy || state.piInstallBusy) return;
+  const canInstall =
+    state.nativeReady &&
+    state.piExtension.available &&
+    (!state.piExtension.installed || state.piExtension.needsUpdate);
+  if (!canInstall || state.busy || state.piInstallBusy || state.piUninstallBusy) return;
   state.piInstallBusy = true;
   state.lastMessage = "Installing Pi extension...";
   postNativeMessage({ action: "installPiExtension" });
+  render();
+}
+
+function uninstallPiExtension() {
+  const canUninstall =
+    state.nativeReady &&
+    state.piExtension.installed;
+  if (!canUninstall || state.busy || state.piInstallBusy || state.piUninstallBusy) return;
+  state.piUninstallBusy = true;
+  state.lastMessage = "Uninstalling Pi extension...";
+  postNativeMessage({ action: "uninstallPiExtension" });
   render();
 }
 
@@ -425,12 +504,28 @@ function handleNativeReady() {
   state.nativeReady = true;
   document.documentElement.classList.add("native-shell");
   requestInstalledPets();
+  requestPiExtensionStatus();
   render();
 }
 
 function requestInstalledPets() {
   if (!nativeBridgeAvailable()) return;
   postNativeMessage({ action: "listInstalledPets" });
+}
+
+function requestPiExtensionStatus() {
+  if (!nativeBridgeAvailable()) return;
+  postNativeMessage({ action: "getPiExtensionStatus" });
+}
+
+function updatePiExtensionState(detail) {
+  if (!detail || typeof detail !== "object") return;
+  state.piExtension = {
+    available: Boolean(detail.available),
+    installed: Boolean(detail.installed),
+    needsUpdate: Boolean(detail.needsUpdate),
+    path: cleanString(detail.path),
+  };
 }
 
 function postNativeMessage(payload) {
@@ -501,10 +596,11 @@ function emptyPreview() {
 }
 
 function spriteScale(frameWidth, frameHeight) {
-  const availableWidth = Math.max(220, window.innerWidth - 340);
-  const availableHeight = Math.max(240, window.innerHeight - 150);
+  const bounds = els.spritePreview.getBoundingClientRect();
+  const availableWidth = Math.max(80, bounds.width - 12);
+  const availableHeight = Math.max(80, bounds.height - 12);
   const fit = Math.min(availableWidth / frameWidth, availableHeight / frameHeight, 1.85);
-  return Math.max(0.85, fit);
+  return Math.max(0.35, fit);
 }
 
 function selectAdjacentPet(direction) {
