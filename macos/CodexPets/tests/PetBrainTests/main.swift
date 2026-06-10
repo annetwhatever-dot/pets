@@ -423,6 +423,81 @@ private func testBubbleHitTestingDoesNotCaptureTransparentGap() {
     expect(!view.containsInteractivePoint(gapPoint), "transparent gap between bubble and sprite should remain click-through")
 }
 
+private func testPetdexManifestParserSupportsV1AndV2() {
+    let v1 = Data("""
+    {
+      "pets": [
+        {
+          "slug": "boba",
+          "displayName": "Boba",
+          "description": "Round friend",
+          "kind": "cat",
+          "submittedBy": "petdex",
+          "spritesheetUrl": "https://assets.petdex.dev/pets/boba/spritesheet.webp",
+          "petJsonUrl": "https://assets.petdex.dev/pets/boba/pet.json",
+          "tags": ["soft", "round"]
+        }
+      ]
+    }
+    """.utf8)
+    let v1Entries = try! PetdexManifestParser.parse(v1)
+    expect(v1Entries.count == 1, "v1 manifest should parse one pet")
+    expect(v1Entries[0].slug == "boba", "v1 slug should be normalized")
+    expect(v1Entries[0].displayName == "Boba", "v1 display name")
+    expect(v1Entries[0].spritesheetURL.absoluteString == "https://assets.petdex.dev/pets/boba/spritesheet.webp", "v1 sprite url")
+    expect(v1Entries[0].tags == ["soft", "round"], "v1 tags")
+
+    let v2 = Data("""
+    {
+      "v": 2,
+      "assetBase": "https://assets.petdex.dev",
+      "pets": [["miso", "Miso", "fox", "ana", "/pets/miso/spritesheet.webp", "/pets/miso/pet.json", "/pets/miso/package.zip"]]
+    }
+    """.utf8)
+    let v2Entries = try! PetdexManifestParser.parse(v2)
+    expect(v2Entries.count == 1, "v2 manifest should parse one compact pet")
+    expect(v2Entries[0].slug == "miso", "v2 slug")
+    expect(v2Entries[0].spritesheetURL.absoluteString == "https://assets.petdex.dev/pets/miso/spritesheet.webp", "v2 relative sprite should become absolute")
+    expect(v2Entries[0].petJSONURL?.absoluteString == "https://assets.petdex.dev/pets/miso/pet.json", "v2 relative pet json should become absolute")
+    expect(v2Entries[0].zipURL?.absoluteString == "https://assets.petdex.dev/pets/miso/package.zip", "v2 relative zip should become absolute")
+}
+
+private func testDownloadedPetdexImportWritesPackageSafely() {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("codex-pets-test-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = PetStore(appSupport: root)
+    let entry = PetdexCatalogEntry(
+        slug: "../miso pet",
+        displayName: "Miso Pet",
+        detail: "Downloaded from Petdex.",
+        kind: "fox",
+        submittedBy: "ana",
+        tags: ["soft"],
+        spritesheetURL: URL(string: "https://assets.petdex.dev/pets/miso/spritesheet.webp")!,
+        petJSONURL: URL(string: "https://assets.petdex.dev/pets/miso/pet.json")!,
+        zipURL: nil,
+        frameWidth: 192,
+        frameHeight: 208
+    )
+    let petJSON = Data("""
+    {"slug":"miso-pet","displayName":"Miso Pet","description":"Downloaded.","frameWidth":192,"frameHeight":208,"spritesheetPath":"../outside.png"}
+    """.utf8)
+    try! FileManager.default.createDirectory(at: store.importedPetsRoot, withIntermediateDirectories: true)
+    let outside = store.importedPetsRoot.appendingPathComponent("outside.png")
+    try! Data([0x89, 0x50, 0x4e, 0x47]).write(to: outside)
+    let sprite = Data([0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00])
+
+    let pet = try! store.importDownloadedPetdexPet(entry, petJSON: petJSON, spritesheet: sprite, spritesheetExtension: "webp")
+    expect(pet.slug == "miso-pet", "import should load slug from written pet.json")
+    expect(pet.displayName == "Miso Pet", "import should load display name")
+    expect(pet.source == .app, "downloaded Petdex pets become imported local pets")
+    expect(pet.directory.path.hasPrefix(store.importedPetsRoot.path), "download should stay under imported pets root")
+    expect(FileManager.default.fileExists(atPath: pet.directory.appendingPathComponent("pet.json").path), "pet.json should be written")
+    expect(FileManager.default.fileExists(atPath: pet.directory.appendingPathComponent("spritesheet.webp").path), "spritesheet should be written")
+    expect(pet.spritesheet.path == pet.directory.appendingPathComponent("spritesheet.webp").path, "import should rewrite remote pet.json spritesheetPath to the downloaded local sprite")
+}
+
 let tests: [(String, () -> Void)] = [
     ("dialogue avoids repeats", testDialogueEngineAvoidsExactAndSemanticRepeats),
     ("dialogue modes and daily budget", testDialogueModesAndDailyBudget),
@@ -431,6 +506,8 @@ let tests: [(String, () -> Void)] = [
     ("pet brain curated workflow murmurs", testPetBrainUsesCuratedMurmursForWorkflowStatus),
     ("bubble dismissal mutes murmurs", testPetBrainDismissedBubbleMutesMurmursForHours),
     ("bubble hit testing keeps transparent gap click-through", testBubbleHitTestingDoesNotCaptureTransparentGap),
+    ("Petdex manifest parser supports v1 and v2", testPetdexManifestParserSupportsV1AndV2),
+    ("downloaded Petdex import writes local package", testDownloadedPetdexImportWritesPackageSafely),
     ("mouse proximity dwell/cooldown", testMouseProximityRequiresDwellAndCooldown),
     ("focus + reduce motion", testFocusModeAndReduceMotionStayQuiet),
     ("Codex events", testCodexEventsMapToEmotionsAndBubbles),

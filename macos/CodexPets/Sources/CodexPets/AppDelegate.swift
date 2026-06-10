@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let overlay = PetOverlayController()
     private var server: StateServer?
     private var statusItem: NSStatusItem?
+    private var petdexBrowser: PetdexBrowserWindowController?
     private var pets: [PetPackage] = []
     private var selectedPetID: String?
 
@@ -66,6 +67,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         toggle.target = self
         toggle.isEnabled = selectedPetID != nil
         menu.addItem(toggle)
+
+        let browsePetdex = NSMenuItem(title: "Browse Petdex...", action: #selector(openPetdexBrowser), keyEquivalent: "b")
+        browsePetdex.target = self
+        menu.addItem(browsePetdex)
 
         let importItem = NSMenuItem(title: "Import Pet Folder...", action: #selector(importPetFolder), keyEquivalent: "i")
         importItem.target = self
@@ -249,6 +254,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func togglePet() {
         overlay.toggle()
         rebuildMenu()
+    }
+
+    @objc private func openPetdexBrowser() {
+        if petdexBrowser == nil {
+            petdexBrowser = PetdexBrowserWindowController(store: store) { [weak self] pet in
+                guard let self else { return }
+                self.pets = self.store.scan()
+                self.selectPet(self.pets.first { $0.directory.path == pet.directory.path } ?? pet)
+                self.overlay.setBubble("Imported \(pet.displayName)")
+            }
+            petdexBrowser?.window?.isReleasedWhenClosed = false
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        petdexBrowser?.showWindow(nil)
+        petdexBrowser?.window?.makeKeyAndOrderFront(nil)
     }
 
     @objc private func importPetFolder() {

@@ -70,13 +70,14 @@ enum PetLoadError: Error, LocalizedError {
 }
 
 final class PetStore {
-    private let fileManager = FileManager.default
+    private let fileManager: FileManager
     let appSupport: URL
     let importedPetsRoot: URL
     let runtimeRoot: URL
 
-    init() {
-        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    init(appSupport explicitAppSupport: URL? = nil, fileManager: FileManager = .default) {
+        self.fileManager = fileManager
+        let base = explicitAppSupport ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("CodexPets", isDirectory: true)
         self.appSupport = base
         self.importedPetsRoot = base.appendingPathComponent("Pets", isDirectory: true)
@@ -125,6 +126,29 @@ final class PetStore {
         let destination = importedPetsRoot.appendingPathComponent(destinationName, isDirectory: true)
         try fileManager.copyItem(at: folder, to: destination)
         return try loadPet(at: destination, source: .app)
+    }
+
+    func importDownloadedPetdexPet(
+        _ entry: PetdexCatalogEntry,
+        petJSON: Data,
+        spritesheet: Data,
+        spritesheetExtension: String
+    ) throws -> PetPackage {
+        let destinationName = uniqueFolderName(slugify(entry.slug))
+        let destination = importedPetsRoot.appendingPathComponent(destinationName, isDirectory: true)
+        let ext = ["webp", "png"].contains(spritesheetExtension.lowercased()) ? spritesheetExtension.lowercased() : "webp"
+        let spriteFileName = "spritesheet.\(ext)"
+        let localPetJSON = try localizedPetJSON(petJSON, spritesheetFileName: spriteFileName)
+
+        do {
+            try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+            try localPetJSON.write(to: destination.appendingPathComponent("pet.json"), options: [.atomic])
+            try spritesheet.write(to: destination.appendingPathComponent(spriteFileName), options: [.atomic])
+            return try loadPet(at: destination, source: .app)
+        } catch {
+            try? fileManager.removeItem(at: destination)
+            throw error
+        }
     }
 
     func loadPet(at directory: URL, source: PetSource) throws -> PetPackage {
@@ -181,6 +205,15 @@ final class PetStore {
         }
 
         throw PetLoadError.missingSpritesheet
+    }
+
+    private func localizedPetJSON(_ data: Data, spritesheetFileName: String) throws -> Data {
+        guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw PetLoadError.invalidManifest
+        }
+        json["spritesheetPath"] = spritesheetFileName
+        json["spritesheet"] = spritesheetFileName
+        return try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
     }
 
     private func uniqueFolderName(_ base: String) -> String {

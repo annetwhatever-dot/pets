@@ -19,7 +19,7 @@ Open it:
 open build/CodexPets.app
 ```
 
-The app appears as a `CP` status-bar item. Use that menu to import a pet folder, switch pets, choose animation states, resize the overlay, copy a state API curl command, or quit.
+The app appears as a `CP` status-bar item. Use that menu to browse the Petdex portal, import a pet folder, switch pets, choose animation states, resize the overlay, copy a state API curl command, or quit.
 
 The menu also includes Calm Pet Engine controls:
 
@@ -38,6 +38,8 @@ Pet Murmurs are stored locally in:
 Clicking a visible murmur bubble dismisses it and mutes additional murmurs for a few hours. Direct `/bubble` API messages still display as explicit caller-provided text.
 
 The transparent overlay is click-through outside the real pet sprite, so padding around the window does not block apps underneath. Mouse proximity, hover, click, double-click, drag, and spam-click reactions work without Accessibility or Input Monitoring permissions.
+
+Use **Browse Petdex...** from the CP menu to open the native Petdex browser. It loads the public Petdex manifest, lets you search/select a pet, previews the first sprite frame, opens the pet's Petdex page, and downloads the pet package into local app storage via **Import & Use**.
 
 Imported pets are copied to:
 

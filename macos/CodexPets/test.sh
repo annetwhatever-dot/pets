@@ -8,6 +8,7 @@ swiftc \
   -framework Cocoa \
   "$SCRIPT_DIR/Sources/CodexPets/DialogueEngine.swift" \
   "$SCRIPT_DIR/Sources/CodexPets/PetModels.swift" \
+  "$SCRIPT_DIR/Sources/CodexPets/PetdexBrowser.swift" \
   "$SCRIPT_DIR/Sources/CodexPets/PetBrain.swift" \
   "$SCRIPT_DIR/Sources/CodexPets/PetOverlay.swift" \
   "$SCRIPT_DIR/tests/PetBrainTests/main.swift" \
