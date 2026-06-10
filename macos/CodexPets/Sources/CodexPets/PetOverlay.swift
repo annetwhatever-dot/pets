@@ -25,6 +25,7 @@ final class PetOverlayController: NSObject {
     var attentionMode: PetAttentionMode { brain.mode }
     var bubbleMode: PetBubbleMode { brain.bubbleMode }
     var reduceMotion: Bool { brain.reduceMotion }
+    var currentBubbleText: String { rootView.bubbleText }
     var petBrowserRequestedHandler: (() -> Void)?
 
     override init() {
@@ -155,10 +156,17 @@ final class PetOverlayController: NSObject {
 
     func applyDaemonSnapshot(_ snapshot: DaemonSnapshot) {
         let presentation = DaemonSnapshotPresenter.presentation(for: snapshot)
-        setState(presentation.stateID)
+        let preserveAutoClearingBubble = presentation.stateID == "idle"
+            && presentation.bubble == nil
+            && hasAutoClearingBubble
+        if preserveAutoClearingBubble {
+            setState(presentation.stateID, preservingBubble: true)
+        } else {
+            setState(presentation.stateID)
+        }
         if let bubble = presentation.bubble {
             setBubble(bubble, autoClearAfter: presentation.autoClearAfter)
-        } else if presentation.stateID == "idle" {
+        } else if presentation.stateID == "idle", !preserveAutoClearingBubble {
             setBubble("", autoClearAfter: nil)
         }
     }
@@ -175,7 +183,10 @@ final class PetOverlayController: NSObject {
 
         if let autoClearAfter, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             bubbleClearTimer = oneShotTimer(after: autoClearAfter) { [weak self] in
-                self?.rootView.bubbleText = ""
+                guard let self else { return }
+                self.rootView.bubbleText = ""
+                self.bubbleClearTimer = nil
+                self.updateMouseTransparencyAndProximity()
             }
         }
         updateMouseTransparencyAndProximity()
@@ -241,13 +252,17 @@ final class PetOverlayController: NSObject {
         setBubble("")
     }
 
-    private func apply(_ decision: PetDecision, resetOverride: TimeInterval? = nil) {
+    private func apply(
+        _ decision: PetDecision,
+        resetOverride: TimeInterval? = nil,
+        preserveExistingBubble: Bool = false
+    ) {
         guard currentPet != nil else { return }
         directSetState(decision.stateID, playback: decision.playback)
 
         if let bubble = decision.bubble {
             setBubble(bubble, autoClearAfter: decision.mood == .waiting ? 8 : 4)
-        } else if decision.mood == .focused || decision.mood == .calm {
+        } else if !preserveExistingBubble && (decision.mood == .focused || decision.mood == .calm) {
             setBubble("")
         }
 
@@ -292,7 +307,19 @@ final class PetOverlayController: NSObject {
     private func scheduleIdleReset(after delay: TimeInterval) {
         idleReset?.invalidate()
         idleReset = oneShotTimer(after: delay) { [weak self] in
-            self?.setState("idle")
+            self?.setState("idle", preservingBubble: true)
+        }
+    }
+
+    private var hasAutoClearingBubble: Bool {
+        bubbleClearTimer != nil && !rootView.bubbleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func setState(_ id: String, preservingBubble: Bool) {
+        if let decision = brain.handle(.codexState(id)) {
+            apply(decision, preserveExistingBubble: preservingBubble)
+        } else {
+            directSetState(id, playback: playbackMode(for: id, duration: nil))
         }
     }
 

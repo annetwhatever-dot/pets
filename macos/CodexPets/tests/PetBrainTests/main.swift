@@ -29,6 +29,13 @@ private func expectDecision(_ decision: PetDecision?, _ message: String) -> PetD
     return decision
 }
 
+private func runMainLoop(for seconds: TimeInterval) {
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+        RunLoop.current.run(mode: .default, before: min(Date().addingTimeInterval(0.02), deadline))
+    }
+}
+
 private func murmurLine(
     _ id: String,
     trigger: PetMurmurEvent,
@@ -409,9 +416,8 @@ private func testPetBrainDismissedBubbleMutesMurmursForHours() {
     expect(unmuted.bubble == "что-то хрустнуло. но не мы.", "murmurs should resume after mute expires")
 }
 
-private func testOverlayHitTestingMakesWholePetBodyDraggable() {
-    let view = PetOverlayView(frame: NSRect(x: 0, y: 0, width: 190, height: 235))
-    let pet = PetPackage(
+private func makeTestPetPackage() -> PetPackage {
+    PetPackage(
         slug: "test",
         displayName: "Test Pet",
         detail: "Test",
@@ -423,6 +429,11 @@ private func testOverlayHitTestingMakesWholePetBodyDraggable() {
         frameHeight: 208,
         states: PetAnimationState.defaults
     )
+}
+
+private func testOverlayHitTestingMakesWholePetBodyDraggable() {
+    let view = PetOverlayView(frame: NSRect(x: 0, y: 0, width: 190, height: 235))
+    let pet = makeTestPetPackage()
     view.setPet(pet, state: PetAnimationState.defaults[0], scale: 0.76, playback: .staticFrame(0))
     view.bubbleText = "пора посмотреть."
     view.bubbleActionHandler = {}
@@ -446,18 +457,7 @@ private func testOverlayHitTestingMakesWholePetBodyDraggable() {
 
 private func testOverlayRightClickRequestsPetBrowser() {
     let view = PetOverlayView(frame: NSRect(x: 0, y: 0, width: 190, height: 235))
-    let pet = PetPackage(
-        slug: "test",
-        displayName: "Test Pet",
-        detail: "Test",
-        kind: "pet",
-        source: .app,
-        directory: URL(fileURLWithPath: "/tmp"),
-        spritesheet: URL(fileURLWithPath: "/tmp/missing-spritesheet.png"),
-        frameWidth: 192,
-        frameHeight: 208,
-        states: PetAnimationState.defaults
-    )
+    let pet = makeTestPetPackage()
     view.setPet(pet, state: PetAnimationState.defaults[0], scale: 0.76, playback: .staticFrame(0))
 
     var rightClicks = 0
@@ -471,6 +471,23 @@ private func testOverlayRightClickRequestsPetBrowser() {
     view.bubbleActionHandler = {}
     view.handleRightClick(at: NSPoint(x: view.bubbleRect.midX, y: view.bubbleRect.midY), activateApp: false)
     expect(rightClicks == 1, "right-clicking a murmur bubble should not open the pet browser")
+}
+
+private func testOverlayKeepsBubbleThroughAutoIdleReset() {
+    let overlay = PetOverlayController()
+    overlay.setPet(makeTestPetPackage())
+    overlay.hide()
+
+    overlay.setState("waving", duration: 0.08)
+    overlay.setBubble("agent done", autoClearAfter: 0.3)
+
+    runMainLoop(for: 0.14)
+    expect(overlay.currentStateID == "idle", "short completion pose should auto-reset to idle")
+    expect(overlay.currentBubbleText == "agent done", "auto idle reset should not clear the active bubble")
+
+    runMainLoop(for: 0.25)
+    expect(overlay.currentBubbleText.isEmpty, "bubble should still clear on its own timer")
+    overlay.hide()
 }
 
 private func testPetdexManifestParserSupportsV1AndV2() {
@@ -589,6 +606,48 @@ private func testDaemonSnapshotPresenterMapsAttentionPriority() {
 
     let approvalPresentation = DaemonSnapshotPresenter.presentation(for: snapshot(attention: "approval_required", status: "running", approval: true))
     expect(approvalPresentation.bubble == "Approval needed: git push origin main", "approval bubble should contain only safe command summary")
+}
+
+private func testOverlayKeepsDaemonDoneBubbleAcrossIdleSnapshot() {
+    let overlay = PetOverlayController()
+    overlay.setPet(makeTestPetPackage())
+    overlay.hide()
+
+    let done = DaemonSnapshot(
+        attention: "done",
+        sessions: [
+            DaemonSession(
+                id: "s1",
+                cwd: nil,
+                title: nil,
+                status: "done",
+                safeSummary: "agent done",
+                tools: nil
+            ),
+        ],
+        pendingApprovals: [],
+        selectedPetId: nil,
+        installedPets: []
+    )
+    let idle = DaemonSnapshot(
+        attention: "idle",
+        sessions: [],
+        pendingApprovals: [],
+        selectedPetId: nil,
+        installedPets: []
+    )
+
+    overlay.applyDaemonSnapshot(done)
+    expect(overlay.currentBubbleText == "Pi done: agent done", "done snapshot should show the completion bubble")
+
+    overlay.applyDaemonSnapshot(idle)
+    expect(overlay.currentStateID == "idle", "idle snapshot should still move the pet to idle")
+    expect(overlay.currentBubbleText == "Pi done: agent done", "idle snapshot should not immediately clear an auto-clearing done bubble")
+
+    overlay.setBubble("stale running", autoClearAfter: nil)
+    overlay.applyDaemonSnapshot(idle)
+    expect(overlay.currentBubbleText.isEmpty, "idle snapshot should clear non-auto-clearing daemon bubbles")
+    overlay.hide()
 }
 
 private func testStateServerRequiresExplicitDebugFlag() {
@@ -948,9 +1007,11 @@ let tests: [(String, () -> Void)] = [
     ("bubble dismissal mutes murmurs", testPetBrainDismissedBubbleMutesMurmursForHours),
     ("overlay hit testing makes whole pet body draggable", testOverlayHitTestingMakesWholePetBodyDraggable),
     ("overlay right-click opens pet browser", testOverlayRightClickRequestsPetBrowser),
+    ("overlay keeps bubble through auto idle reset", testOverlayKeepsBubbleThroughAutoIdleReset),
     ("Petdex manifest parser supports v1 and v2", testPetdexManifestParserSupportsV1AndV2),
     ("downloaded Petdex import writes local package", testDownloadedPetdexImportWritesPackageSafely),
     ("daemon snapshot presenter maps attention", testDaemonSnapshotPresenterMapsAttentionPriority),
+    ("overlay keeps daemon done bubble across idle snapshot", testOverlayKeepsDaemonDoneBubbleAcrossIdleSnapshot),
     ("debug state server is opt-in", testStateServerRequiresExplicitDebugFlag),
     ("Petdex browser bridge action allowlist", testPetdexBrowserBridgeActionAllowlist),
     ("Pi extension installer copies extension", testPiExtensionInstallerCopiesExtensionIntoPiDirectory),
