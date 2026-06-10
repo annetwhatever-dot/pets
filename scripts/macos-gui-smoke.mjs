@@ -21,7 +21,13 @@ const telemetryPath = path.join(tempRoot, "gui-smoke.jsonl");
 
 let app;
 try {
-  await run("sh", ["macos/CodexPets/build.sh"], { cwd: root });
+  await run("sh", ["macos/CodexPets/build.sh"], {
+    cwd: root,
+    env: {
+      ...process.env,
+      CODEX_PETS_SKIP_VENDOR_PETDEX: "1",
+    },
+  });
 
   app = spawn(appBinary, [], {
     cwd: root,
@@ -29,6 +35,7 @@ try {
       ...process.env,
       PI_PET_SOCKET_DIR: socketDir,
       CODEX_PETS_GUI_SMOKE_FILE: telemetryPath,
+      CODEX_PETS_GUI_SMOKE_OPEN_BROWSER: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -40,6 +47,14 @@ try {
   });
 
   await waitForTelemetry((line) => line.event === "launch");
+  await waitForTelemetry(
+    (line) =>
+      line.event === "petdexBrowser" &&
+      line.bootStarted === true &&
+      line.bootLoaded === true &&
+      Number(line.rowCount) >= 5 &&
+      line.selectedName,
+  );
   await waitForSocket(socketPath, () => app.exitCode !== null, () => appOutput());
 
   const running = await requestDaemon("session.upsert", {

@@ -1,9 +1,18 @@
 #!/usr/bin/env node
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, join, posix } from "node:path";
 
 const DEFAULT_MANIFEST = "https://assets.petdex.dev/manifests/petdex-v1.json";
 const DEFAULT_ASSET_BASE = "https://assets.petdex.dev";
+const FETCH_RETRIES = 4;
+const RETRY_DELAY_MS = 1000;
+
+class HTTPStatusError extends Error {
+  constructor(url, status) {
+    super(`${url} returned ${status}`);
+    this.status = status;
+  }
+}
 
 const options = parseArgs(process.argv.slice(2));
 
@@ -21,6 +30,7 @@ async function dumpPetdex({
   concurrency,
   includePackages,
   allowPartial,
+  resume,
 }) {
   const startedAt = new Date().toISOString();
   console.log(`Loading ${manifestURL}`);
@@ -28,7 +38,9 @@ async function dumpPetdex({
   const pets = normalizeManifest(sourceManifest, DEFAULT_ASSET_BASE);
   const selected = typeof limit === "number" ? pets.slice(0, limit) : pets;
 
-  await rm(outDir, { recursive: true, force: true });
+  if (!resume) {
+    await rm(outDir, { recursive: true, force: true });
+  }
   await mkdir(outDir, { recursive: true });
   await writeJSON(join(outDir, "source-manifest.json"), sourceManifest);
 
@@ -38,7 +50,7 @@ async function dumpPetdex({
 
   await mapLimit(selected, concurrency, async (pet) => {
     try {
-      localPets.push(await dumpPet(outDir, pet, includePackages));
+      localPets.push(await dumpPet(outDir, pet, includePackages, resume));
       completed += 1;
       if (completed % 10 === 0 || completed === selected.length) {
         console.log(`Dumped ${completed}/${selected.length}`);
@@ -95,28 +107,30 @@ async function dumpPetdex({
   }
 }
 
-async function dumpPet(outDir, pet, includePackages) {
+async function dumpPet(outDir, pet, includePackages, resume) {
   const petDirName = safeSegment(pet.slug);
   const petDir = join(outDir, "pets", petDirName);
   await mkdir(petDir, { recursive: true });
 
   const spriteName = safeAssetName(pet.spritesheetUrl, "spritesheet.webp");
   const spritePath = join(petDir, spriteName);
-  await downloadFile(pet.spritesheetUrl, spritePath);
+  await downloadFile(pet.spritesheetUrl, spritePath, { resume });
 
   let localPetJsonURL = "";
   if (pet.petJsonUrl) {
     const petJsonPath = join(petDir, "pet.json");
-    await downloadFile(pet.petJsonUrl, petJsonPath);
-    localPetJsonURL = posix.join("pets", petDirName, "pet.json");
+    if (await downloadOptionalFile(pet.petJsonUrl, petJsonPath, { resume })) {
+      localPetJsonURL = posix.join("pets", petDirName, "pet.json");
+    }
   }
 
   let localZipURL = "";
   if (includePackages && pet.zipUrl) {
     const packageName = safeAssetName(pet.zipUrl, "package.zip");
     const packagePath = join(petDir, packageName);
-    await downloadFile(pet.zipUrl, packagePath);
-    localZipURL = posix.join("pets", petDirName, packageName);
+    if (await downloadOptionalFile(pet.zipUrl, packagePath, { resume })) {
+      localZipURL = posix.join("pets", petDirName, packageName);
+    }
   }
 
   return {
@@ -139,22 +153,89 @@ async function dumpPet(outDir, pet, includePackages) {
 }
 
 async function fetchJSON(url) {
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) throw new Error(`${url} returned ${response.status}`);
-  return response.json();
+  return withRetries(`GET ${url}`, async () => {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) throw httpError(url, response.status);
+    return response.json();
+  });
 }
 
-async function downloadFile(url, filePath) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`${url} returned ${response.status}`);
-  const data = Buffer.from(await response.arrayBuffer());
+async function downloadFile(url, filePath, { resume = false } = {}) {
+  if (resume && (await hasContent(filePath))) return;
+
+  const data = await withRetries(`GET ${url}`, async () => {
+    const response = await fetch(url);
+    if (!response.ok) throw httpError(url, response.status);
+    return Buffer.from(await response.arrayBuffer());
+  });
   await mkdir(dirname(filePath), { recursive: true });
   await writeFile(filePath, data);
+}
+
+async function downloadOptionalFile(url, filePath, options) {
+  try {
+    await downloadFile(url, filePath, options);
+    return true;
+  } catch (error) {
+    if (isPermanentHTTPError(error)) {
+      console.warn(`Skipping optional asset ${url}: ${error.message}`);
+      return false;
+    }
+    throw error;
+  }
 }
 
 async function writeJSON(filePath, value) {
   await mkdir(dirname(filePath), { recursive: true });
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+async function withRetries(label, operation) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= FETCH_RETRIES; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (isPermanentHTTPError(error)) break;
+      if (attempt === FETCH_RETRIES) break;
+      const delay = RETRY_DELAY_MS * attempt;
+      console.warn(
+        `${label} failed (${error.message || String(error)}); retrying in ${delay}ms`,
+      );
+      await sleep(delay);
+    }
+  }
+
+  throw lastError;
+}
+
+function httpError(url, status) {
+  return new HTTPStatusError(url, status);
+}
+
+function isPermanentHTTPError(error) {
+  return (
+    error instanceof HTTPStatusError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 408 &&
+    error.status !== 429
+  );
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function hasContent(filePath) {
+  try {
+    const info = await stat(filePath);
+    return info.isFile() && info.size > 0;
+  } catch {
+    return false;
+  }
 }
 
 function normalizeManifest(raw, defaultAssetBase) {
@@ -226,6 +307,7 @@ function parseArgs(args) {
     concurrency: 6,
     includePackages: false,
     allowPartial: false,
+    resume: false,
     help: false,
   };
 
@@ -249,6 +331,9 @@ function parseArgs(args) {
         break;
       case "--allow-partial":
         parsed.allowPartial = true;
+        break;
+      case "--resume":
+        parsed.resume = true;
         break;
       case "--help":
       case "-h":
@@ -334,6 +419,7 @@ Options:
   --concurrency <count>  Parallel downloads (default: 6)
   --include-packages     Also download package zip files when present
   --allow-partial        Keep pets that downloaded successfully if some fail
+  --resume               Reuse existing non-empty downloaded files in the output directory
   --help                 Show this help
 `);
 }

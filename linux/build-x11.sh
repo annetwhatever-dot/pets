@@ -11,3 +11,6 @@ if ! pkg-config --exists x11; then
 fi
 
 CGO_ENABLED=1 go build -o "$OUT_DIR/pi-pet-overlay-x11" ./cmd/pi-pet-overlay-x11
+
+mkdir -p "$OUT_DIR/pi-extension"
+cp "$ROOT_DIR/pi-extension/index.ts" "$OUT_DIR/pi-extension/index.ts"

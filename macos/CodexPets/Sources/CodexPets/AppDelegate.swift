@@ -54,14 +54,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.applyDaemonSnapshot(snapshot)
         }
 
-        petdexBrowser = makePetdexBrowser()
-        petdexBrowser?.prepareForDisplay()
-
         if let first = pets.first {
             selectPet(first)
         }
         publishInstalledPetsToDaemon()
         rebuildMenu()
+
+        if ProcessInfo.processInfo.environment["CODEX_PETS_GUI_SMOKE_OPEN_BROWSER"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300)) { [weak self] in
+                self?.openPetdexBrowser()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -313,34 +316,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.selectPet(pet)
                 self.publishInstalledPetsToDaemon()
             },
-            onUninstallInstalled: { [weak self] pet in
-                guard let self else { return }
-                do {
-                    try self.store.uninstallImportedPet(pet)
-                    self.pets = self.store.scan()
-                    if self.selectedPetID == pet.id {
-                        if let first = self.pets.first {
-                            self.selectPet(first)
-                        } else {
-                            self.selectedPetID = nil
-                            self.overlay.setPet(nil)
-                        }
-                    }
-                    self.publishInstalledPetsToDaemon()
-                    self.rebuildMenu()
-                } catch {
-                    self.showError(error)
-                }
-            },
-            daemonSnapshotProvider: { [weak self] completion in
-                guard let daemonClient = self?.daemonClient else {
-                    completion(nil)
-                    return
-                }
-                daemonClient.getSnapshot(completion: completion)
-            },
-            onApprovalDecision: { [weak self] approvalID, decision in
-                self?.daemonClient?.respondToApproval(approvalID: approvalID, decision: decision)
+            onBrowserLoaded: { [weak self] payload in
+                self?.guiSmokeRecorder?.recordPetdexBrowser(payload)
             }
         )
         controller.window?.isReleasedWhenClosed = false
@@ -492,7 +469,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let presentation = DaemonSnapshotPresenter.presentation(for: snapshot)
         overlay.applyDaemonSnapshot(snapshot)
-        petdexBrowser?.publishDaemonSnapshot(snapshot)
         guiSmokeRecorder?.recordSnapshot(snapshot, presentation: presentation, overlayState: overlay.currentStateID)
     }
 
@@ -562,6 +538,10 @@ final class GUISmokeRecorder {
             "installedPets": snapshot.installedPets.count,
             "selectedPetId": snapshot.selectedPetId ?? "",
         ])
+    }
+
+    func recordPetdexBrowser(_ payload: [String: Any]) {
+        write(payload)
     }
 
     private func write(_ fields: [String: Any]) {

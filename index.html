@@ -3,207 +3,57 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta
-      name="description"
-      content="Browse Codex pets from Petdex and add local custom Codex pet packages."
-    />
-    <title>Codex Pets</title>
+    <meta name="description" content="Choose a Codex pet from Petdex." />
+    <title>Petdex</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <div id="app-shell">
-      <header class="app-toolbar" aria-label="Application toolbar">
-        <div class="toolbar-leading">
-          <span class="app-glyph" aria-hidden="true">CP</span>
-          <div class="toolbar-title">
-            <strong>Petdex</strong>
-            <small id="gallery-status" class="status-line">Loading Petdex...</small>
-          </div>
+    <main class="petdex-shell" aria-label="Petdex">
+      <aside class="source-pane" aria-label="Pets">
+        <div class="search-wrap">
+          <input
+            id="search"
+            type="search"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Search"
+            aria-label="Search pets"
+          />
         </div>
 
-        <div class="toolbar-spacer" aria-hidden="true"></div>
-      </header>
+        <p id="status" class="status-line" role="status">Loading Petdex...</p>
 
-      <main class="app-layout">
-        <aside class="sidebar" aria-label="Library controls">
-          <section class="sidebar-section search-section">
-            <label class="search-field" for="pet-search">
-              <span aria-hidden="true">/</span>
-              <input
-                id="pet-search"
-                type="search"
-                autocomplete="off"
-                placeholder="Search pets"
-              />
-            </label>
+        <div id="pet-list" class="pet-list" role="listbox" aria-label="Available pets"></div>
+      </aside>
 
-            <div class="segmented-control" role="tablist" aria-label="Pet source">
-              <button class="segment is-active" type="button" data-source="all">
-                All
-              </button>
-              <button class="segment" type="button" data-source="petdex">
-                Petdex
-              </button>
-              <button class="segment" type="button" data-source="custom">
-                Custom
-              </button>
-              <button class="segment native-only" type="button" data-source="installed">
-                Installed
-              </button>
-            </div>
-          </section>
+      <section class="detail-pane" aria-label="Selected pet">
+        <div class="preview-region">
+          <div id="sprite-preview" class="sprite-preview" aria-live="polite"></div>
+        </div>
 
-          <section class="sidebar-section counters-section" aria-label="Library counts">
-            <div>
-              <span>Catalog</span>
-              <strong id="manifest-total">0</strong>
-            </div>
-            <div>
-              <span>Visible</span>
-              <strong id="visible-total">0</strong>
-            </div>
-          </section>
-
-          <section class="sidebar-section import-section">
-            <div class="section-heading">
-              <h2>Custom package</h2>
-              <span id="custom-count">0</span>
-            </div>
-
-            <div class="import-actions">
-              <label class="file-button">
-                <input id="folder-input" type="file" webkitdirectory multiple />
-                Folder
-              </label>
-              <label class="file-button">
-                <input
-                  id="files-input"
-                  type="file"
-                  accept=".json,image/webp,image/png"
-                  multiple
-                />
-                Files
-              </label>
-            </div>
-
-            <form id="url-import-form" class="url-import">
-              <label class="sr-only" for="pet-json-url">pet.json URL</label>
-              <input
-                id="pet-json-url"
-                type="url"
-                placeholder="pet.json URL"
-                spellcheck="false"
-              />
-              <label class="sr-only" for="sprite-url">Spritesheet URL</label>
-              <input
-                id="sprite-url"
-                type="url"
-                placeholder="spritesheet URL"
-                spellcheck="false"
-              />
-              <button type="submit" class="plain-button">Add URL</button>
-            </form>
-
-            <p id="import-status" class="status-line" role="status"></p>
-          </section>
-
-          <section id="daemon-panel" class="sidebar-section daemon-section native-only" aria-label="Pi status">
-            <div class="section-heading">
-              <h2>Pi</h2>
-              <span id="approval-count">0</span>
-            </div>
-            <p id="daemon-status" class="status-line">Waiting for Pi status...</p>
-            <div id="approval-list" class="approval-list"></div>
-            <div id="session-list" class="session-list"></div>
-          </section>
-
-          <details class="sidebar-section source-section">
-            <summary>Catalog source</summary>
-            <form id="manifest-form" class="manifest-form">
-              <label class="sr-only" for="manifest-url">Manifest URL</label>
-              <input
-                id="manifest-url"
-                name="manifestUrl"
-                type="url"
-                spellcheck="false"
-                value="https://assets.petdex.dev/manifests/petdex-v1.json"
-              />
-              <button type="submit" class="plain-button">Load</button>
-            </form>
-            <div class="source-actions">
-              <button id="refresh-manifest" class="plain-button" type="button">Refresh</button>
-              <button id="shuffle-pet" class="plain-button" type="button">Shuffle</button>
-            </div>
-          </details>
-        </aside>
-
-        <section class="library-pane" aria-label="Pet library">
-          <div class="pane-header">
-            <div>
-              <h2>Library</h2>
-              <p>Choose a pet to preview, import, or select.</p>
-            </div>
+        <footer class="detail-footer">
+          <div class="pet-copy">
+            <p id="source-label" class="source-label">Petdex</p>
+            <h1 id="pet-name">Petdex</h1>
+            <p id="pet-description">Choose a pet to preview it.</p>
           </div>
-
-          <div id="pet-grid" class="pet-grid"></div>
-          <button id="load-more" class="load-more" type="button">Load More</button>
-        </section>
-
-        <section class="detail-pane" aria-label="Selected pet">
-          <div class="preview-pane">
-            <div class="preview-toolbar">
-              <div class="eyebrow-row">
-                <span id="selected-source">Petdex</span>
-                <span id="selected-kind">creature</span>
-              </div>
-              <a id="open-petdex" class="text-link" href="https://petdex.dev" target="_blank" rel="noreferrer">
-                Open
-              </a>
-            </div>
-
-            <div class="sprite-stage">
-              <div id="selected-sprite" class="selected-sprite" aria-live="polite"></div>
-            </div>
-
-            <div id="state-tabs" class="state-tabs" aria-label="Animation state"></div>
+          <div class="action-row" aria-label="Actions">
+            <button id="install-pi-action" class="secondary-action" type="button" disabled>
+              Install to Pi
+            </button>
+            <button id="primary-action" type="button" disabled>Use</button>
           </div>
+        </footer>
+      </section>
+    </main>
 
-          <div class="inspector-pane">
-            <div class="pet-identity">
-              <h1 id="selected-name">Boba</h1>
-              <p id="selected-description">
-                A tiny otter sipping bubble tea while keeping you company in Codex.
-              </p>
-            </div>
-
-            <div id="selected-tags" class="tag-row"></div>
-
-            <div class="command-row">
-              <code id="install-command">npx petdex install boba</code>
-              <button id="copy-command" class="plain-button" type="button" title="Copy">
-                Copy
-              </button>
-              <button id="native-import" class="primary-button native-only" type="button" hidden>
-                Import & Use
-              </button>
-            </div>
-          </div>
-        </section>
-      </main>
-    </div>
-
-    <template id="pet-card-template">
-      <article class="pet-card">
-        <button class="pet-card-button" type="button">
-          <span class="pet-card-sprite"></span>
-          <span class="pet-card-body">
-            <strong></strong>
-            <small></small>
-          </span>
-        </button>
-      </article>
+    <template id="pet-row-template">
+      <button class="pet-row" type="button" role="option">
+        <span class="pet-row-name"></span>
+        <span class="pet-row-meta"></span>
+      </button>
     </template>
 
-    <script type="module" src="app.js"></script>
+    <script defer src="app.js"></script>
   </body>
 </html>

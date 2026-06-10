@@ -2,7 +2,7 @@
 
 A small project for Codex-compatible pets:
 
-- A browser gallery for browsing Petdex pets and adding custom packages.
+- A compact WebView Petdex picker for browsing and importing pets.
 - A native macOS status-bar app that shows an imported pet in an always-on-top transparent overlay.
 
 ## Native macOS App
@@ -19,7 +19,7 @@ Open it:
 open build/CodexPets.app
 ```
 
-The app appears as a `CP` status-bar item. Use that menu to browse the Petdex portal, import a pet folder, switch pets, choose animation states, resize the overlay, or quit.
+The app appears as a `CP` status-bar item. Use that menu to open Petdex, import a pet folder, switch pets, choose animation states, resize the overlay, or quit.
 
 The menu also includes Calm Pet Engine controls:
 
@@ -39,7 +39,7 @@ Clicking a visible murmur bubble dismisses it and mutes additional murmurs for a
 
 The transparent overlay is click-through outside the real pet sprite, so padding around the window does not block apps underneath. Mouse proximity, hover, click, double-click, drag, and spam-click reactions work without Accessibility or Input Monitoring permissions.
 
-Use **Browse Petdex...** from the CP menu to open the WebView-backed Petdex browser. It uses the same gallery UI as the browser app, preloads off-screen for a faster first open, and downloads the selected Petdex package into local app storage via **Import & Use**.
+Use **Browse Petdex...** from the CP menu to open the WebView-backed Petdex picker. It presents a native-style split view with search, a pet list, a preview, and compact actions. Petdex pets are downloaded into local app storage with **Import**; installed pets can be selected with **Use**. **Install to Pi** copies the bundled Pi extension to `~/.pi/agent/extensions/codex-pets.ts`.
 
 Imported pets are copied to:
 
@@ -181,7 +181,13 @@ On Linux X11, build and run the overlay app; it also starts the daemon socket in
 
 ```sh
 sh linux/build-x11.sh
-./build/pi-pet-overlay-x11
+./build/linux/pi-pet-overlay-x11
+```
+
+Install the Pi extension from the Linux build with:
+
+```sh
+./build/linux/pi-pet-overlay-x11 -install-pi-extension
 ```
 
 The standalone Go daemon can still be run with `go run ./cmd/pi-pet-daemon` for headless protocol checks.
@@ -201,12 +207,12 @@ env GOCACHE=/tmp/codex-pets-go-build GOOS=linux CGO_ENABLED=0 go build -o /tmp/p
 Latest checkpoint results on macOS:
 
 - `npm test`: passed; covers Go protocol, daemon attention state, tool progress updates, selected/installed pet state, catalog cache state, approval broker/integration flow, Petdex provider normalization, Linux X11 PNG atlas/frame/text helper logic, Pi extension unit tests, turn/tool lifecycle hooks, abort-aware approval, serialized notification delivery, and a scripted Pi-extension-to-real-daemon-to-overlay Unix-socket approval flow.
-- `node --check app.js`: passed; verifies the bundled browser script parses after native bridge, installed-pet, and approval-panel edits.
-- `npm run test:browser-smoke`: passed; renders the bundled browser UI in local headless Chrome, verifies installed pet spritesheet previews, installed-pet selection, approval approve/deny bridge messages, app-imported pet uninstall messages, daemon panel rendering, and writes `/tmp/codex-pets-browser-smoke.png`.
+- `node --check app.js`: passed; verifies the bundled WebView picker script parses after native bridge and installed-pet edits.
+- `npm run test:browser-smoke`: passed; renders the bundled WebView picker in local headless Chrome, verifies installed pet spritesheet preview, Pi extension install, and installed-pet selection bridge messages, and writes `/tmp/codex-pets-browser-smoke.png`.
 - `npm run test:macos-gui-smoke`: passed; builds and launches the real AppKit app, verifies the app creates its in-process Unix-socket daemon, sends fake Pi `running`, `failed`, and `approval_required` events to that socket, and verifies native overlay-state mapping.
-- `sh macos/CodexPets/test.sh`: passed; covers PetBrain, Petdex parser/importer/search/cache, WebView bridge action allowlist and payload validation, installed-pet bridge payloads, daemon snapshot overlay presentation, in-app daemon Unix-socket protocol handling, and overlay hit testing.
+- `sh macos/CodexPets/test.sh`: passed; covers PetBrain, Petdex parser/importer, WebView bridge action allowlist and payload validation, Pi extension install, installed-pet bridge payloads, daemon snapshot overlay presentation, in-app daemon Unix-socket protocol handling, and overlay hit testing.
 - `sh macos/CodexPets/build.sh`: passed; produced `build/CodexPets.app`.
-- `env GOCACHE=/tmp/codex-pets-go-build GOOS=linux CGO_ENABLED=0 go build -o /tmp/pi-pet-overlay-x11-check ./cmd/pi-pet-overlay-x11`: passed; verifies the Linux overlay command wrapper and non-cgo fallback compile from macOS.
+- `env GOCACHE=/tmp/codex-pets-go-build GOOS=linux CGO_ENABLED=0 go build -o /tmp/pi-pet-overlay-x11-check ./cmd/pi-pet-overlay-x11`: passed; verifies the Linux overlay command wrapper, Pi extension installer flag, and non-cgo fallback compile from macOS.
 
 ## Security Model
 
@@ -214,13 +220,13 @@ Latest checkpoint results on macOS:
 - No TCP listener is enabled by default. The macOS legacy HTTP state API starts only when `CODEX_PETS_ENABLE_HTTP_STATE_API=1` is set explicitly for manual debugging.
 - The Pi extension does not send prompts, provider payloads, tool output, or full approval payload logs to the daemon. It sends lifecycle events and bounded safe summaries such as tool name and a shortened command summary.
 - Pet packs are treated as data-only packages. The local importer requires `pet.json` plus a PNG/WebP raster spritesheet, enforces size limits, rejects path traversal for spritesheet paths, and stores license/attribution metadata when present.
-- The WebView browser is separate from overlay rendering. The native shell bridge is allowlisted to pet import, installed-pet list, installed-pet select, app-imported-pet uninstall, daemon snapshot, and approval approve/deny messages.
+- The WebView picker is separate from overlay rendering. The native shell bridge is allowlisted to pet import, installed-pet list, installed-pet select, and Pi extension install messages.
 
 ## Platform Limitations
 
 - The macOS AppKit app hosts the Unix-socket daemon in-process, subscribes to it through the same local protocol path as external clients, and maps daemon attention states to native pet states. The older local HTTP state API remains as an opt-in debug compatibility path.
-- The Linux X11 app source is implemented behind `linux,cgo` build tags and can be built on Linux with `sh linux/build-x11.sh` after installing `pkg-config` and `libX11` development headers. Native X11 build/run verification is unavailable in this macOS environment; local tests cover the renderer's PNG atlas loading, frame selection, drag direction helpers, scaling, and status text helpers without requiring X11. The current Linux renderer supports PNG spritesheets; WebP spritesheets need conversion or a future native decoder dependency.
-- The WebView browser can preview Petdex/custom spritesheets, import/select Petdex pets in the macOS shell, list installed pets through the native bridge, select installed pets, uninstall app-imported pets, show daemon Pi sessions, and approve/deny pending command approvals. The local rendered browser smoke covers those bridge-driven installed-pet and approval flows in headless Chrome. The macOS GUI smoke covers the real AppKit app's in-process daemon socket and native overlay-state mapping without requiring live Pi inference.
+- The Linux X11 app source is implemented behind `linux,cgo` build tags and can be built on Linux with `sh linux/build-x11.sh` after installing `pkg-config` and `libX11` development headers. The Linux binary also supports `-install-pi-extension`, which copies the bundled Pi extension to `~/.pi/agent/extensions/codex-pets.ts`. Native X11 build/run verification is unavailable in this macOS environment; local tests cover the renderer's PNG atlas loading, frame selection, drag direction helpers, scaling, status text helpers, and Pi extension installer without requiring X11. The current Linux renderer supports PNG spritesheets; WebP spritesheets need conversion or a future native decoder dependency.
+- The WebView picker can preview Petdex spritesheets, import Petdex pets in the macOS shell, install the Pi extension, list installed pets through the native bridge, and select installed pets. The local rendered browser smoke covers those bridge-driven flows in headless Chrome. The macOS GUI smoke covers the real AppKit app's in-process daemon socket and native overlay-state mapping without requiring live Pi inference.
 - PadX is represented by `PadXProvider` behind the catalog interface. Web searches for `PadX pet package format API PadX pets manifest`, `PadX provider pet catalog API`, `"PadX" "pets"`, `"PadX" "pet" "manifest"`, and `"PadX" "package" "manifest"` did not reveal a public pet catalog API or package format. To replace the stub, provide a PadX manifest URL, SDK/API docs, or local package format.
 
 Manual standalone daemon smoke test:
@@ -237,5 +243,5 @@ Manual macOS app smoke test:
 1. Build and open `build/CodexPets.app`; the app creates the Pi socket itself.
 3. Add `pi-extension/index.ts` to Pi's extension paths and start a Pi session.
 4. Confirm the AppKit overlay changes state for `approval_required`, `failed`, `done`, `running`, `thinking`, and `idle`.
-5. Trigger a risky Pi bash tool call and confirm **Browse Petdex...** shows the pending approval in the Pi panel. Use **Approve** or **Deny** and confirm the blocked Pi tool call resumes or is blocked.
-6. In **Browse Petdex...**, use **Import & Use**, switch to **Installed**, select an installed pet, and remove an app-imported pet.
+5. Trigger a risky Pi bash tool call and confirm the overlay moves into its approval-needed waiting state.
+6. In **Browse Petdex...**, use **Install to Pi** to copy the Pi extension, then use **Import** for a Petdex pet or **Use** for an installed pet.

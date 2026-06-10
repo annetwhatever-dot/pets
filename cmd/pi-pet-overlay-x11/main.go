@@ -11,12 +11,29 @@ import (
 	"syscall"
 
 	"codex-pets/internal/daemon"
+	"codex-pets/internal/piinstall"
 	"codex-pets/internal/x11overlay"
 )
 
 func main() {
 	socketPath := flag.String("socket", daemon.DefaultSocketPath(), "Pi Pet daemon Unix socket path")
+	installPiExtension := flag.Bool("install-pi-extension", false, "Install the Pi extension into ~/.pi/agent/extensions and exit")
+	piExtensionSource := flag.String("pi-extension-source", "", "Pi extension source file for -install-pi-extension")
+	piExtensionDir := flag.String("pi-extension-dir", "", "Pi extension install directory for -install-pi-extension")
 	flag.Parse()
+
+	if *installPiExtension {
+		installedPath, err := piinstall.Install(piinstall.Options{
+			SourcePath:     *piExtensionSource,
+			DestinationDir: *piExtensionDir,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pi-pet-overlay-x11: install Pi extension: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Installed Pi extension to %s\n", installedPath)
+		return
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -1,0 +1,71 @@
+{
+  "generatedAt": "2026-06-11T00:00:00.000Z",
+  "sourceManifest": "prebundled",
+  "pets": [
+    {
+      "source": "petdex",
+      "slug": "aqua-wisp",
+      "displayName": "Aqua Wisp",
+      "description": "Animated Codex-compatible pet bundled with the browser.",
+      "kind": "creature",
+      "submittedBy": "denghaowen59",
+      "tags": ["prebundled"],
+      "spritesheetUrl": "pets/aqua-wisp/sprite.webp",
+      "petJsonUrl": "pets/aqua-wisp/pet.json",
+      "frameWidth": 192,
+      "frameHeight": 208
+    },
+    {
+      "source": "petdex",
+      "slug": "boba",
+      "displayName": "Boba",
+      "description": "Animated Codex-compatible pet bundled with the browser.",
+      "kind": "creature",
+      "submittedBy": "railly",
+      "tags": ["prebundled"],
+      "spritesheetUrl": "pets/boba/spritesheet.webp",
+      "petJsonUrl": "pets/boba/pet.json",
+      "frameWidth": 192,
+      "frameHeight": 208
+    },
+    {
+      "source": "petdex",
+      "slug": "cat",
+      "displayName": "Cat",
+      "description": "Animated Codex-compatible pet bundled with the browser.",
+      "kind": "creature",
+      "submittedBy": "huigegood",
+      "tags": ["prebundled"],
+      "spritesheetUrl": "pets/cat/sprite.webp",
+      "petJsonUrl": "pets/cat/pet.json",
+      "frameWidth": 192,
+      "frameHeight": 208
+    },
+    {
+      "source": "petdex",
+      "slug": "pc-guy",
+      "displayName": "PC Guy",
+      "description": "Animated Codex-compatible pet bundled with the browser.",
+      "kind": "character",
+      "submittedBy": "c",
+      "tags": ["prebundled"],
+      "spritesheetUrl": "pets/pc-guy/sprite.webp",
+      "petJsonUrl": "pets/pc-guy/pet.json",
+      "frameWidth": 192,
+      "frameHeight": 208
+    },
+    {
+      "source": "petdex",
+      "slug": "pochita",
+      "displayName": "Pochita",
+      "description": "Animated Codex-compatible pet bundled with the browser.",
+      "kind": "creature",
+      "submittedBy": "DeryFerd",
+      "tags": ["prebundled"],
+      "spritesheetUrl": "pets/pochita/spritesheet.webp",
+      "petJsonUrl": "pets/pochita/pet.json",
+      "frameWidth": 192,
+      "frameHeight": 208
+    }
+  ]
+}

@@ -210,64 +210,6 @@ enum PetdexManifestParser {
     }
 }
 
-enum PetdexCatalogSearch {
-    static func filter(_ entries: [PetdexCatalogEntry], query rawQuery: String) -> [PetdexCatalogEntry] {
-        let tokens = searchTokens(rawQuery)
-        guard !tokens.isEmpty else { return entries }
-
-        return entries.compactMap { entry -> (entry: PetdexCatalogEntry, score: Int)? in
-            guard let score = score(entry, tokens: tokens) else { return nil }
-            return (entry, score)
-        }
-        .sorted { left, right in
-            if left.score != right.score { return left.score > right.score }
-            return left.entry.displayName.localizedCaseInsensitiveCompare(right.entry.displayName) == .orderedAscending
-        }
-        .map(\.entry)
-    }
-
-    private static func score(_ entry: PetdexCatalogEntry, tokens: [String]) -> Int? {
-        let weightedFields: [(text: String, weight: Int)] = [
-            (entry.displayName, 100),
-            (entry.slug, 80),
-            (entry.tags.joined(separator: " "), 65),
-            (entry.kind, 45),
-            (entry.submittedBy, 35),
-            (entry.detail, 20),
-        ]
-        let normalizedFields = weightedFields.map { (normalize($0.text), $0.weight) }
-        var total = 0
-
-        for token in tokens {
-            let best = normalizedFields
-                .filter { field, _ in field.contains(token) }
-                .map(\.1)
-                .max()
-            guard let best else { return nil }
-            total += best
-        }
-
-        return total
-    }
-
-    private static func searchTokens(_ value: String) -> [String] {
-        normalize(value)
-            .split(separator: " ")
-            .map(String.init)
-            .filter { !$0.isEmpty }
-    }
-
-    private static func normalize(_ value: String) -> String {
-        let folded = value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-        let scalars = folded.unicodeScalars.map { scalar -> Character in
-            CharacterSet.alphanumerics.contains(scalar) ? Character(scalar) : " "
-        }
-        return String(scalars)
-            .split(separator: " ")
-            .joined(separator: " ")
-    }
-}
-
 private extension Array {
     subscript(safe index: Int) -> Element? {
         indices.contains(index) ? self[index] : nil
@@ -304,7 +246,7 @@ final class PetdexCatalogClient {
                 done(.success(entry.generatedPetJSON()))
                 return
             }
-            session.codexPetsDataTask(with: url, completion: done)
+            Self.loadData(from: url, session: session, completion: done)
         }
 
         petJSONTask { [session] jsonResult in
@@ -312,7 +254,7 @@ final class PetdexCatalogClient {
             case let .failure(error):
                 completion(.failure(error))
             case let .success(petJSON):
-                session.codexPetsDataTask(with: entry.spritesheetURL) { spriteResult in
+                Self.loadData(from: entry.spritesheetURL, session: session) { spriteResult in
                     switch spriteResult {
                     case let .failure(error):
                         completion(.failure(error))
@@ -332,6 +274,23 @@ final class PetdexCatalogClient {
         session.codexPetsDataTask(with: url) { result in
             completion(result.flatMap { data in Result { try PetdexManifestParser.parse(data) } })
         }
+    }
+
+    private static func loadData(
+        from url: URL,
+        session: URLSession,
+        completion: @escaping (Result<Data, Error>) -> Void
+    ) {
+        if url.isFileURL {
+            do {
+                completion(.success(try Data(contentsOf: url)))
+            } catch {
+                completion(.failure(error))
+            }
+            return
+        }
+
+        session.codexPetsDataTask(with: url, completion: completion)
     }
 
     private static func safeSpriteExtension(from url: URL) -> String {
@@ -369,133 +328,6 @@ enum PetdexNetworkError: Error, LocalizedError {
     }
 }
 
-enum PetdexPreviewError: Error, LocalizedError {
-    case invalidImage
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidImage: return "Petdex preview image could not be decoded."
-        }
-    }
-}
-
-protocol PetdexPreviewCancellable {
-    func cancel()
-}
-
-extension URLSessionDataTask: PetdexPreviewCancellable {}
-
-final class PetdexPreviewCache {
-    private let cache = NSCache<NSString, NSImage>()
-
-    init(countLimit: Int = 96) {
-        cache.countLimit = countLimit
-    }
-
-    func image(for entry: PetdexCatalogEntry) -> NSImage? {
-        cache.object(forKey: key(for: entry))
-    }
-
-    func store(_ image: NSImage, for entry: PetdexCatalogEntry) {
-        cache.setObject(image, forKey: key(for: entry))
-    }
-
-    private func key(for entry: PetdexCatalogEntry) -> NSString {
-        "\(entry.spritesheetURL.absoluteString)#\(entry.frameWidth)x\(entry.frameHeight)" as NSString
-    }
-}
-
-final class PetdexPreviewLoader {
-    private let session: URLSession
-    private let cache: PetdexPreviewCache
-    private let decodeQueue = DispatchQueue(label: "dev.petdex.codex-pets.preview", qos: .userInitiated)
-
-    init(session: URLSession = .shared, cache: PetdexPreviewCache = PetdexPreviewCache()) {
-        self.session = session
-        self.cache = cache
-    }
-
-    @discardableResult
-    func loadPreview(
-        for entry: PetdexCatalogEntry,
-        completion: @escaping (Result<NSImage, Error>) -> Void
-    ) -> PetdexPreviewCancellable? {
-        if let image = cache.image(for: entry) {
-            DispatchQueue.main.async {
-                completion(.success(image))
-            }
-            return nil
-        }
-
-        var request = URLRequest(url: entry.spritesheetURL)
-        request.cachePolicy = .returnCacheDataElseLoad
-        request.timeoutInterval = 15
-        request.setValue("CodexPets/1.0", forHTTPHeaderField: "User-Agent")
-        let task = session.dataTask(with: request) { [weak self] data, response, error in
-            if let error = error as? URLError, error.code == .cancelled {
-                return
-            }
-            if let error {
-                DispatchQueue.main.async { completion(.failure(error)) }
-                return
-            }
-            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                DispatchQueue.main.async { completion(.failure(PetdexNetworkError.httpStatus(http.statusCode))) }
-                return
-            }
-            guard let self, let data else {
-                DispatchQueue.main.async { completion(.failure(PetdexPreviewError.invalidImage)) }
-                return
-            }
-
-            self.decodeQueue.async {
-                guard let preview = Self.firstFrameImage(
-                    from: data,
-                    frameWidth: entry.frameWidth,
-                    frameHeight: entry.frameHeight
-                ) else {
-                    DispatchQueue.main.async { completion(.failure(PetdexPreviewError.invalidImage)) }
-                    return
-                }
-                self.cache.store(preview, for: entry)
-                DispatchQueue.main.async { completion(.success(preview)) }
-            }
-        }
-        task.resume()
-        return task
-    }
-
-    static func firstFrameImage(from data: Data, frameWidth: Int, frameHeight: Int) -> NSImage? {
-        guard let image = NSImage(data: data) else { return nil }
-        return firstFrameImage(from: image, frameWidth: frameWidth, frameHeight: frameHeight)
-    }
-
-    static func firstFrameImage(from image: NSImage, frameWidth: Int, frameHeight: Int) -> NSImage {
-        let outputSize = NSSize(width: frameWidth, height: frameHeight)
-        let output = NSImage(size: outputSize)
-        output.lockFocus()
-        NSColor.clear.setFill()
-        NSRect(origin: .zero, size: outputSize).fill()
-        let imageHeight = image.size.height > 1 ? image.size.height : CGFloat(frameHeight * 9)
-        let source = NSRect(
-            x: 0,
-            y: max(0, imageHeight - CGFloat(frameHeight)),
-            width: CGFloat(frameWidth),
-            height: CGFloat(frameHeight)
-        )
-        image.draw(
-            in: NSRect(origin: .zero, size: outputSize),
-            from: source,
-            operation: .sourceOver,
-            fraction: 1,
-            respectFlipped: false,
-            hints: [.interpolation: NSImageInterpolation.none]
-        )
-        output.unlockFocus()
-        return output
-    }
-}
-
 private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
     weak var delegate: WKScriptMessageHandler?
 
@@ -512,23 +344,31 @@ enum PetdexBrowserBridgeAction: String, CaseIterable {
     case importPet
     case listInstalledPets
     case selectInstalledPet
-    case uninstallInstalledPet
-    case getDaemonSnapshot
-    case approvalDecision
+    case installPiExtension
 }
 
-typealias DaemonSnapshotProvider = (@escaping (DaemonSnapshot?) -> Void) -> Void
+enum PiExtensionInstallError: Error, LocalizedError {
+    case sourceNotFound
+
+    var errorDescription: String? {
+        switch self {
+        case .sourceNotFound: return "Pi extension source was not found in the app bundle."
+        }
+    }
+}
 
 final class PetdexBrowserWindowController: NSWindowController, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     private enum Constants {
         static let bridgeName = "codexPets"
         static let browserResourceDirectory = "PetdexBrowser"
-        static let initialSize = NSRect(x: 0, y: 0, width: 1180, height: 760)
-        static let minimumSize = NSSize(width: 920, height: 620)
+        static let piExtensionResourceDirectory = "PiExtension"
+        static let piExtensionInstalledFileName = "codex-pets.ts"
+        static let initialSize = NSRect(x: 0, y: 0, width: 860, height: 560)
+        static let minimumSize = NSSize(width: 680, height: 460)
         static let backgroundColor = NSColor(
-            srgbRed: 245.0 / 255.0,
-            green: 247.0 / 255.0,
-            blue: 248.0 / 255.0,
+            srgbRed: 236.0 / 255.0,
+            green: 239.0 / 255.0,
+            blue: 241.0 / 255.0,
             alpha: 1
         )
     }
@@ -538,9 +378,7 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
     private let onImport: (PetPackage) -> Void
     private let installedPetsProvider: () -> [PetPackage]
     private let onSelectInstalled: (PetPackage) -> Void
-    private let onUninstallInstalled: (PetPackage) -> Void
-    private let daemonSnapshotProvider: DaemonSnapshotProvider
-    private let onApprovalDecision: (_ approvalID: String, _ decision: String) -> Void
+    private let onBrowserLoaded: (([String: Any]) -> Void)?
     private let webView: WKWebView
     private let loadingView = NSView(frame: .zero)
     private let statusLabel = NSTextField(labelWithString: "Loading Petdex...")
@@ -556,18 +394,14 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
         installedPetsProvider: (() -> [PetPackage])? = nil,
         onImport: @escaping (PetPackage) -> Void,
         onSelectInstalled: ((PetPackage) -> Void)? = nil,
-        onUninstallInstalled: ((PetPackage) -> Void)? = nil,
-        daemonSnapshotProvider: DaemonSnapshotProvider? = nil,
-        onApprovalDecision: ((_ approvalID: String, _ decision: String) -> Void)? = nil
+        onBrowserLoaded: (([String: Any]) -> Void)? = nil
     ) {
         self.store = store
         self.client = client
         self.onImport = onImport
         self.installedPetsProvider = installedPetsProvider ?? { store.scan() }
         self.onSelectInstalled = onSelectInstalled ?? onImport
-        self.onUninstallInstalled = onUninstallInstalled ?? { _ in }
-        self.daemonSnapshotProvider = daemonSnapshotProvider ?? { completion in completion(nil) }
-        self.onApprovalDecision = onApprovalDecision ?? { _, _ in }
+        self.onBrowserLoaded = onBrowserLoaded
         self.webView = WKWebView(frame: .zero, configuration: Self.makeWebViewConfiguration())
         let window = NSWindow(
             contentRect: Constants.initialSize,
@@ -575,7 +409,7 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
             backing: .buffered,
             defer: false
         )
-        window.title = "Browse Petdex"
+        window.title = "Petdex"
         window.minSize = Constants.minimumSize
         window.backgroundColor = Constants.backgroundColor
         super.init(window: window)
@@ -623,12 +457,8 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
             sendInstalledPets()
         case .selectInstalledPet:
             selectInstalledPet(from: body["petId"])
-        case .uninstallInstalledPet:
-            uninstallInstalledPet(from: body["petId"])
-        case .getDaemonSnapshot:
-            sendDaemonSnapshot()
-        case .approvalDecision:
-            handleApprovalDecision(body)
+        case .installPiExtension:
+            installPiExtension()
         }
     }
 
@@ -636,6 +466,7 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
         didFinishInitialLoad = true
         revealWebView()
         notifyNativeReady()
+        reportBrowserLoadedForSmoke()
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -653,10 +484,6 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
         loadingView.isHidden = false
         showLoadingStatus("Reloading Petdex...")
         loadBrowserIfNeeded()
-    }
-
-    func publishDaemonSnapshot(_ snapshot: DaemonSnapshot) {
-        sendDaemonSnapshot(snapshot)
     }
 
     func webView(
@@ -715,7 +542,7 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
         """
         userContentController.addUserScript(WKUserScript(source: bootstrap, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         configuration.userContentController = userContentController
-        configuration.websiteDataStore = .default()
+        configuration.websiteDataStore = .nonPersistent()
         configuration.suppressesIncrementalRendering = true
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
@@ -795,7 +622,27 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
             detail: [:]
         )
         sendInstalledPets()
-        sendDaemonSnapshot()
+    }
+
+    private func reportBrowserLoadedForSmoke() {
+        guard let onBrowserLoaded else { return }
+        let script = """
+        (() => ({
+          event: "petdexBrowser",
+          bootStarted: Boolean(window.__codexPetsAppBoot?.started),
+          bootLoaded: Boolean(window.__codexPetsAppBoot?.loaded),
+          bootError: window.__codexPetsAppBoot?.error || "",
+          rowCount: document.querySelectorAll(".pet-row").length,
+          status: document.querySelector("#status")?.textContent?.trim() || "",
+          selectedName: document.querySelector("#pet-name")?.textContent?.trim() || ""
+        }))()
+        """
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
+            self?.webView.evaluateJavaScript(script) { value, _ in
+                guard let payload = value as? [String: Any] else { return }
+                onBrowserLoaded(payload)
+            }
+        }
     }
 
     private func importPet(from payload: Any?) {
@@ -863,53 +710,31 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
         sendInstalledPets()
     }
 
-    private func uninstallInstalledPet(from payload: Any?) {
-        guard let pet = installedPet(for: payload) else {
-            evaluateImportResult(ok: false, message: "Installed pet was not found")
-            return
+    private func installPiExtension() {
+        do {
+            let destination = try Self.installPiExtension()
+            evaluateJavaScriptEvent(
+                name: "codex-pets-native-pi-install-result",
+                detail: [
+                    "ok": true,
+                    "message": "Installed Pi extension to \(destination.path)",
+                    "path": destination.path,
+                ]
+            )
+        } catch {
+            evaluateJavaScriptEvent(
+                name: "codex-pets-native-pi-install-result",
+                detail: [
+                    "ok": false,
+                    "message": error.localizedDescription,
+                ]
+            )
         }
-        onUninstallInstalled(pet)
-        evaluateImportResult(ok: true, message: "Removed \(pet.displayName)")
-        sendInstalledPets()
     }
 
     private func installedPet(for payload: Any?) -> PetPackage? {
         guard let petID = Self.string(payload) else { return nil }
         return installedPetsProvider().first { $0.id == petID }
-    }
-
-    private func handleApprovalDecision(_ body: [String: Any]) {
-        guard
-            let approvalID = Self.string(body["approvalId"]),
-            let decision = Self.string(body["decision"]),
-            decision == "approved" || decision == "denied"
-        else {
-            evaluateImportResult(ok: false, message: "Approval response is incomplete")
-            return
-        }
-        onApprovalDecision(approvalID, decision)
-        evaluateImportResult(ok: true, message: decision == "approved" ? "Approved command" : "Denied command")
-        sendDaemonSnapshot()
-    }
-
-    private func sendDaemonSnapshot() {
-        daemonSnapshotProvider { [weak self] snapshot in
-            guard let self, let snapshot else { return }
-            self.sendDaemonSnapshot(snapshot)
-        }
-    }
-
-    private func sendDaemonSnapshot(_ snapshot: DaemonSnapshot) {
-        guard
-            let data = try? JSONEncoder().encode(snapshot),
-            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else {
-            return
-        }
-        evaluateJavaScriptEvent(
-            name: "codex-pets-native-daemon-snapshot",
-            detail: object
-        )
     }
 
     private func evaluateJavaScriptEvent(name: String, detail: [String: Any]) {
@@ -937,6 +762,51 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
         return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
+    @discardableResult
+    static func installPiExtension(
+        sourceURL explicitSourceURL: URL? = nil,
+        destinationDirectory explicitDestinationDirectory: URL? = nil,
+        fileManager: FileManager = .default
+    ) throws -> URL {
+        guard let sourceURL = explicitSourceURL ?? piExtensionSourceURL(fileManager: fileManager) else {
+            throw PiExtensionInstallError.sourceNotFound
+        }
+
+        let destinationDirectory = explicitDestinationDirectory ?? defaultPiExtensionDirectory(fileManager: fileManager)
+        try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
+
+        let destinationURL = destinationDirectory.appendingPathComponent(Constants.piExtensionInstalledFileName)
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            try fileManager.removeItem(at: destinationURL)
+        }
+        try fileManager.copyItem(at: sourceURL, to: destinationURL)
+        return destinationURL
+    }
+
+    private static func piExtensionSourceURL(fileManager: FileManager = .default) -> URL? {
+        var candidates: [URL] = []
+        if let resourceURL = Bundle.main.resourceURL {
+            candidates.append(
+                resourceURL
+                    .appendingPathComponent(Constants.piExtensionResourceDirectory, isDirectory: true)
+                    .appendingPathComponent("index.ts")
+            )
+        }
+        candidates.append(
+            URL(fileURLWithPath: fileManager.currentDirectoryPath)
+                .appendingPathComponent("pi-extension", isDirectory: true)
+                .appendingPathComponent("index.ts")
+        )
+        return candidates.first { fileManager.fileExists(atPath: $0.path) }
+    }
+
+    private static func defaultPiExtensionDirectory(fileManager: FileManager = .default) -> URL {
+        fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent(".pi", isDirectory: true)
+            .appendingPathComponent("agent", isDirectory: true)
+            .appendingPathComponent("extensions", isDirectory: true)
+    }
+
     static func installedPetPayload(_ pet: PetPackage) -> [String: Any] {
         [
             "source": "installed",
@@ -947,16 +817,49 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
             "kind": pet.kind,
             "submittedBy": pet.source.label,
             "tags": [],
-            "spritesheetUrl": pet.spritesheet.absoluteString,
+            "spritesheetUrl": spritesheetPreviewURL(for: pet.spritesheet),
             "frameWidth": pet.frameWidth,
             "frameHeight": pet.frameHeight,
             "canUninstall": pet.source == .app,
         ]
     }
 
+    private static func spritesheetPreviewURL(for url: URL) -> String {
+        let maximumInlineBytes = 8 * 1024 * 1024
+        guard url.isFileURL,
+              let data = try? Data(contentsOf: url),
+              data.count <= maximumInlineBytes
+        else {
+            return url.absoluteString
+        }
+
+        let mimeType: String
+        switch url.pathExtension.lowercased() {
+        case "png":
+            mimeType = "image/png"
+        case "webp":
+            mimeType = "image/webp"
+        default:
+            mimeType = "application/octet-stream"
+        }
+        return "data:\(mimeType);base64,\(data.base64EncodedString())"
+    }
+
     private static func shouldOpenExternally(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased() else { return false }
         return scheme == "http" || scheme == "https"
+    }
+
+    private static func isAllowedBrowserFileURL(_ url: URL) -> Bool {
+        guard url.isFileURL,
+              let browserRoot = browserIndexURL()?.deletingLastPathComponent().standardizedFileURL
+        else {
+            return false
+        }
+
+        let rootPath = browserRoot.path.hasSuffix("/") ? browserRoot.path : "\(browserRoot.path)/"
+        let path = url.standardizedFileURL.path
+        return path == browserRoot.path || path.hasPrefix(rootPath)
     }
 
     static func entry(from payload: Any?) -> PetdexCatalogEntry? {
@@ -985,7 +888,7 @@ final class PetdexBrowserWindowController: NSWindowController, WKNavigationDeleg
     private static func webURL(_ value: Any?) -> URL? {
         guard let text = string(value),
               let url = URL(string: text),
-              shouldOpenExternally(url)
+              shouldOpenExternally(url) || isAllowedBrowserFileURL(url)
         else {
             return nil
         }

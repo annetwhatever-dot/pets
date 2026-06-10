@@ -519,53 +519,6 @@ private func testDownloadedPetdexImportWritesPackageSafely() {
     expect(pet.spritesheet.path == pet.directory.appendingPathComponent("spritesheet.webp").path, "import should rewrite remote pet.json spritesheetPath to the downloaded local sprite")
 }
 
-private func petdexEntry(
-    _ slug: String,
-    displayName: String,
-    detail: String = "",
-    kind: String = "pet",
-    submittedBy: String = "",
-    tags: [String] = [],
-    frameWidth: Int = 192,
-    frameHeight: Int = 208
-) -> PetdexCatalogEntry {
-    PetdexCatalogEntry(
-        slug: slug,
-        displayName: displayName,
-        detail: detail,
-        kind: kind,
-        submittedBy: submittedBy,
-        tags: tags,
-        spritesheetURL: URL(string: "https://assets.petdex.dev/pets/\(slug)/spritesheet.webp")!,
-        petJSONURL: nil,
-        zipURL: nil,
-        frameWidth: frameWidth,
-        frameHeight: frameHeight
-    )
-}
-
-private func testPetdexCatalogSearchFindsTagsAndRanksNameMatches() {
-    let detailOnly = petdexEntry("sleepy-fox", displayName: "Sleepy Fox", detail: "A small boba companion")
-    let tagOnly = petdexEntry("miso", displayName: "Miso", tags: ["Boba Tea"])
-    let nameMatch = petdexEntry("boba", displayName: "Boba Cat", detail: "Round friend")
-
-    let results = PetdexCatalogSearch.filter([detailOnly, tagOnly, nameMatch], query: "boba")
-
-    expect(results.map(\.slug) == ["boba", "miso", "sleepy-fox"], "search should find tags/detail and rank name matches first")
-}
-
-private func testPetdexPreviewCacheKeysIncludeFrameSize() {
-    let cache = PetdexPreviewCache()
-    let image = NSImage(size: NSSize(width: 12, height: 12))
-    let small = petdexEntry("miso", displayName: "Miso", frameWidth: 96, frameHeight: 104)
-    let large = petdexEntry("miso", displayName: "Miso", frameWidth: 192, frameHeight: 208)
-
-    cache.store(image, for: small)
-
-    expect(cache.image(for: small) === image, "cache should return an image for the same URL and frame size")
-    expect(cache.image(for: large) == nil, "cache key should include frame size so previews do not reuse the wrong crop")
-}
-
 private func testDaemonSnapshotPresenterMapsAttentionPriority() {
     func snapshot(attention: String, status: String, approval: Bool = false) -> DaemonSnapshot {
         DaemonSnapshot(
@@ -628,14 +581,38 @@ private func testPetdexBrowserBridgeActionAllowlist() {
             "importPet",
             "listInstalledPets",
             "selectInstalledPet",
-            "uninstallInstalledPet",
-            "getDaemonSnapshot",
-            "approvalDecision",
+            "installPiExtension",
         ]),
         "native bridge should expose only the expected allowlisted actions"
     )
     expect(PetdexBrowserBridgeAction(rawValue: "openShell") == nil, "native bridge should reject unknown actions")
     expect(PetdexBrowserBridgeAction(rawValue: "eval") == nil, "native bridge should reject privileged-looking actions")
+}
+
+private func testPiExtensionInstallerCopiesExtensionIntoPiDirectory() {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("codex-pets-pi-extension-\(UUID().uuidString)", isDirectory: true)
+    let sourceURL = root.appendingPathComponent("source", isDirectory: true).appendingPathComponent("index.ts")
+    let destinationDirectory = root
+        .appendingPathComponent("home", isDirectory: true)
+        .appendingPathComponent(".pi", isDirectory: true)
+        .appendingPathComponent("agent", isDirectory: true)
+        .appendingPathComponent("extensions", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    try! FileManager.default.createDirectory(at: sourceURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
+    try! Data("old extension".utf8).write(to: destinationDirectory.appendingPathComponent("codex-pets.ts"))
+    try! Data("new extension".utf8).write(to: sourceURL)
+
+    let installed = try! PetdexBrowserWindowController.installPiExtension(
+        sourceURL: sourceURL,
+        destinationDirectory: destinationDirectory
+    )
+    let installedText = try! String(contentsOf: installed, encoding: .utf8)
+
+    expect(installed.lastPathComponent == "codex-pets.ts", "Pi extension installer should use a stable app-owned file name")
+    expect(installedText == "new extension", "Pi extension installer should copy and update the bundled extension")
 }
 
 private func testPetdexBrowserBridgePetPayloadValidation() {
@@ -676,14 +653,21 @@ private func testPetdexBrowserBridgePetPayloadValidation() {
 }
 
 private func testInstalledPetPayloadIsDataOnly() {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("codex-pets-payload-\(UUID().uuidString)", isDirectory: true)
+    let spriteURL = root.appendingPathComponent("spritesheet.png")
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try! Data([0x89, 0x50, 0x4e, 0x47]).write(to: spriteURL)
+    defer { try? FileManager.default.removeItem(at: root) }
+
     let pet = PetPackage(
         slug: "miso",
         displayName: "Miso",
         detail: "Imported pet",
         kind: "fox",
         source: .app,
-        directory: URL(fileURLWithPath: "/tmp/codex-pets/miso"),
-        spritesheet: URL(fileURLWithPath: "/tmp/codex-pets/miso/spritesheet.png"),
+        directory: root,
+        spritesheet: spriteURL,
         frameWidth: 96,
         frameHeight: 104,
         states: PetAnimationState.defaults
@@ -692,7 +676,7 @@ private func testInstalledPetPayloadIsDataOnly() {
     let payload = PetdexBrowserWindowController.installedPetPayload(pet)
     expect(payload["source"] as? String == "installed", "installed pet payload should be marked as installed source")
     expect(payload["nativePetId"] as? String == pet.id, "installed pet payload should include opaque native pet id")
-    expect(payload["spritesheetUrl"] as? String == pet.spritesheet.absoluteString, "installed pet payload should expose only file URL for spritesheet preview")
+    expect((payload["spritesheetUrl"] as? String)?.hasPrefix("data:image/png;base64,") == true, "installed pet payload should inline readable spritesheets for WebView preview")
     expect(payload["canUninstall"] as? Bool == true, "app-imported installed pet should be uninstallable")
     expect(payload["frameWidth"] as? Int == 96, "installed pet payload should preserve frame width")
     expect(payload["frameHeight"] as? Int == 104, "installed pet payload should preserve frame height")
@@ -837,11 +821,10 @@ let tests: [(String, () -> Void)] = [
     ("overlay hit testing makes whole pet body draggable", testOverlayHitTestingMakesWholePetBodyDraggable),
     ("Petdex manifest parser supports v1 and v2", testPetdexManifestParserSupportsV1AndV2),
     ("downloaded Petdex import writes local package", testDownloadedPetdexImportWritesPackageSafely),
-    ("Petdex catalog search finds tags and ranks name matches", testPetdexCatalogSearchFindsTagsAndRanksNameMatches),
-    ("Petdex preview cache keys include frame size", testPetdexPreviewCacheKeysIncludeFrameSize),
     ("daemon snapshot presenter maps attention", testDaemonSnapshotPresenterMapsAttentionPriority),
     ("debug state server is opt-in", testStateServerRequiresExplicitDebugFlag),
     ("Petdex browser bridge action allowlist", testPetdexBrowserBridgeActionAllowlist),
+    ("Pi extension installer copies extension", testPiExtensionInstallerCopiesExtensionIntoPiDirectory),
     ("Petdex browser bridge pet payload validation", testPetdexBrowserBridgePetPayloadValidation),
     ("installed pet payload is data-only", testInstalledPetPayloadIsDataOnly),
     ("in-app daemon Pi protocol socket", testInAppDaemonServesPiProtocolOverUnixSocket),

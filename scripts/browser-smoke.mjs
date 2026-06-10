@@ -171,6 +171,14 @@ async function evaluateSmoke(cdp, spriteURL) {
   const source = `
     (async (spriteURL) => {
       const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const waitFor = async (predicate) => {
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline) {
+          if (predicate()) return;
+          await nextFrame();
+        }
+        throw new Error("condition timed out");
+      };
       window.__nativeMessages = [];
       window.CodexPetsNative = {
         postMessage(payload) {
@@ -196,70 +204,39 @@ async function evaluateSmoke(cdp, spriteURL) {
           }]
         }
       }));
-      window.dispatchEvent(new CustomEvent("codex-pets-native-daemon-snapshot", {
-        detail: {
-          attention: "approval_required",
-          sessions: [{
-            id: "session-1",
-            cwd: "/repo",
-            title: "Repo",
-            status: "running",
-            safeSummary: "running tests"
-          }],
-          pendingApprovals: [{
-            id: "approval-1",
-            sessionId: "session-1",
-            toolName: "bash",
-            commandSummary: "git push origin main",
-            risk: "medium",
-            state: "pending"
-          }]
-        }
-      }));
+      await waitFor(() => document.querySelector('.pet-row[data-source="installed"]'));
+
+      document.querySelector('.pet-row[data-source="installed"]').click();
       await nextFrame();
 
-      document.querySelector('[data-source="installed"]').click();
-      await nextFrame();
-      document.querySelector(".pet-card-button").click();
-      await nextFrame();
-
-      const nativeImport = document.querySelector("#native-import");
-      const importButtonEnabledBeforeClick = !nativeImport.disabled && nativeImport.textContent.trim() === "Use Pet";
-      nativeImport.click();
+      const installPiAction = document.querySelector("#install-pi-action");
+      const piInstallEnabledBeforeClick = !installPiAction.disabled && installPiAction.textContent.trim() === "Install to Pi";
+      installPiAction.click();
       await nextFrame();
 
-      const approve = [...document.querySelectorAll(".approval-row button")]
-        .find((button) => button.textContent.trim() === "Approve");
-      approve.click();
+      const primaryAction = document.querySelector("#primary-action");
+      const useButtonEnabledBeforeClick = !primaryAction.disabled && primaryAction.textContent.trim() === "Use";
+      primaryAction.click();
       await nextFrame();
 
-      const remove = document.querySelector(".pet-remove");
-      remove.click();
-      await nextFrame();
-
-      const selectedFrame = document.querySelector("#selected-sprite .pet-sprite-frame");
-      const selectedSprite = document.querySelector("#selected-sprite .pet-sprite");
-      const cardSprite = document.querySelector(".pet-card-sprite .pet-sprite-static");
+      const selectedFrame = document.querySelector("#sprite-preview .pet-sprite-frame");
+      const selectedSprite = document.querySelector("#sprite-preview .pet-sprite");
       const selectedStyle = getComputedStyle(selectedSprite);
 
       return {
         nativeShell: document.documentElement.classList.contains("native-shell"),
-        installedTabDisplay: getComputedStyle(document.querySelector('[data-source="installed"]')).display,
-        daemonPanelDisplay: getComputedStyle(document.querySelector("#daemon-panel")).display,
-        cardCount: document.querySelectorAll(".pet-card").length,
-        selectedSource: document.querySelector("#selected-source").textContent.trim(),
-        selectedName: document.querySelector("#selected-name").textContent.trim(),
-        nativeImportText: nativeImport.textContent.trim(),
-        importButtonEnabledBeforeClick,
-        approvalCount: document.querySelector("#approval-count").textContent.trim(),
-        approvalText: document.querySelector(".approval-row")?.textContent || "",
-        sessionText: document.querySelector(".session-row")?.textContent || "",
+        rowCount: document.querySelectorAll(".pet-row").length,
+        selectedSource: document.querySelector("#source-label").textContent.trim(),
+        selectedName: document.querySelector("#pet-name").textContent.trim(),
+        primaryActionText: primaryAction.textContent.trim(),
+        installPiActionText: installPiAction.textContent.trim(),
+        piInstallEnabledBeforeClick,
+        useButtonEnabledBeforeClick,
+        status: document.querySelector("#status").textContent.trim(),
         selectedBackground: selectedStyle.backgroundImage,
-        selectedSpriteY: selectedSprite.style.getPropertyValue("--sprite-y"),
         selectedSpriteFrames: selectedSprite.style.getPropertyValue("--sprite-frames"),
         selectedFrameWidth: selectedFrame.style.getPropertyValue("--frame-w"),
         selectedFrameHeight: selectedFrame.style.getPropertyValue("--frame-h"),
-        cardBackground: getComputedStyle(cardSprite).backgroundImage,
         messages: window.__nativeMessages,
       };
     })(${JSON.stringify(spriteURL)})
@@ -278,29 +255,26 @@ async function evaluateSmoke(cdp, spriteURL) {
 function assertSmokeResult(result) {
   const failures = [];
   if (!result.nativeShell) failures.push("native-shell class was not enabled");
-  if (result.installedTabDisplay === "none") failures.push("installed source tab is hidden");
-  if (result.daemonPanelDisplay === "none") failures.push("daemon panel is hidden");
-  if (result.cardCount !== 1) failures.push(`installed card count = ${result.cardCount}`);
-  if (result.selectedSource !== "Installed") failures.push(`selected source = ${result.selectedSource}`);
+  if (result.rowCount < 1) failures.push(`row count = ${result.rowCount}`);
+  if (!result.selectedSource.startsWith("Installed")) failures.push(`selected source = ${result.selectedSource}`);
   if (result.selectedName !== "Smoke Pet") failures.push(`selected pet = ${result.selectedName}`);
-  if (!result.importButtonEnabledBeforeClick) failures.push("Use Pet button was not enabled for installed pet");
-  if (result.approvalCount !== "1") failures.push(`approval count = ${result.approvalCount}`);
-  if (!result.approvalText.includes("git push origin main")) failures.push("approval row did not render safe command summary");
-  if (!result.sessionText.includes("running tests")) failures.push("session row did not render safe summary");
+  if (result.primaryActionText !== "Use") failures.push(`primary action = ${result.primaryActionText}`);
+  if (result.installPiActionText !== "Installing...") failures.push(`install Pi action = ${result.installPiActionText}`);
+  if (!result.piInstallEnabledBeforeClick) failures.push("Install to Pi button was not enabled");
+  if (!result.useButtonEnabledBeforeClick) failures.push("Use button was not enabled for installed pet");
+  if (!result.status) failures.push("status was empty");
   if (!result.selectedBackground.includes("data:image/png")) failures.push("selected sprite did not use data PNG spritesheet");
-  if (!result.cardBackground.includes("data:image/png")) failures.push("card sprite did not use data PNG spritesheet");
-  if (!["0px", "-0px"].includes(result.selectedSpriteY)) failures.push(`selected sprite y = ${result.selectedSpriteY}`);
   if (result.selectedSpriteFrames !== "6") failures.push(`selected sprite frames = ${result.selectedSpriteFrames}`);
   if (result.selectedFrameWidth !== "8px" || result.selectedFrameHeight !== "8px") {
     failures.push(`selected frame size = ${result.selectedFrameWidth} x ${result.selectedFrameHeight}`);
   }
   const actions = result.messages.map((message) => message.action);
-  for (const action of ["listInstalledPets", "getDaemonSnapshot", "selectInstalledPet", "approvalDecision", "uninstallInstalledPet"]) {
+  for (const action of ["listInstalledPets", "installPiExtension", "selectInstalledPet"]) {
     if (!actions.includes(action)) failures.push(`missing native message ${action}`);
   }
-  const approval = result.messages.find((message) => message.action === "approvalDecision");
-  if (approval?.decision !== "approved" || approval?.approvalId !== "approval-1") {
-    failures.push(`bad approval decision payload ${JSON.stringify(approval)}`);
+  const selection = result.messages.find((message) => message.action === "selectInstalledPet");
+  if (selection?.petId !== "native-smoke-pet") {
+    failures.push(`bad installed selection payload ${JSON.stringify(selection)}`);
   }
   if (failures.length > 0) {
     throw new Error(`browser smoke failed:\n- ${failures.join("\n- ")}`);
